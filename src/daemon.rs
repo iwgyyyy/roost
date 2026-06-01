@@ -131,6 +131,7 @@ impl DaemonState {
                     last_activity_secs: elapsed,
                     busy_secs: busy.as_secs(),
                     last_prompt: s.last_prompt.clone(),
+                    last_prompt_age_secs: s.last_prompt_at.map(|t| now.duration_since(t).as_secs()),
                     host_app: s.host_app.clone(),
                     host_bundle_id: s.host_bundle_id.clone(),
                     terminal_session_id: s.terminal_session_id.clone(),
@@ -157,9 +158,17 @@ impl DaemonState {
             _ => 4,
         };
         views.sort_by(|a, b| {
+            // Attention priority, then most-recent user prompt first (None last),
+            // then id as a stable final tiebreaker. Recency is keyed on the user's
+            // prompt time — not last_activity — so a busy agent firing tool hooks
+            // doesn't churn the order.
             pri(&a.state)
                 .cmp(&pri(&b.state))
-                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| {
+                    a.last_prompt_age_secs
+                        .unwrap_or(u64::MAX)
+                        .cmp(&b.last_prompt_age_secs.unwrap_or(u64::MAX))
+                })
                 .then_with(|| a.id.cmp(&b.id))
         });
 

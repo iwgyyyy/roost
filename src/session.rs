@@ -178,6 +178,10 @@ pub struct AgentSession {
     pub active_accum: Duration,
     /// Start of the current active segment; `None` when paused / not yet started.
     pub active_since: Option<Instant>,
+    /// Timestamp of the most recent user prompt (UserPromptSubmit). Drives the
+    /// stable within-group list order — it only changes when the user sends a
+    /// message, unlike `last_activity` which every hook event bumps.
+    pub last_prompt_at: Option<Instant>,
 
     // ── Phase 4: jump locator fields (§14) ───────────────────────────────
     pub host_app: Option<String>,
@@ -212,6 +216,7 @@ impl AgentSession {
             awaiting_clarify: false,
             active_accum: Duration::ZERO,
             active_since: None,
+            last_prompt_at: None,
             host_app: ev.host_app.clone(),
             host_bundle_id: ev.host_bundle_id.clone(),
             terminal_session_id: ev.terminal_session_id.clone(),
@@ -240,6 +245,11 @@ impl AgentSession {
     pub fn apply(&mut self, ev: &HookEvent) -> bool {
         let now = Instant::now();
         self.last_activity = now;
+        // Stamp the user-prompt time (used for stable list ordering). Covers all
+        // families: Claude/Codex/DeepSeek all emit UserPromptSubmit.
+        if matches!(ev.kind, EventKind::UserPromptSubmit) {
+            self.last_prompt_at = Some(now);
+        }
         // Update pid if provided
         if let Some(p) = ev.pid {
             self.pid = Some(p);

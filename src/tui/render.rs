@@ -643,6 +643,7 @@ mod tests {
             last_activity_secs: 5,
             busy_secs: 0,
             last_prompt: None,
+            last_prompt_age_secs: None,
             host_app: None,
             host_bundle_id: None,
             terminal_session_id: None,

@@ -88,8 +88,16 @@ pub fn group_and_sort(sessions: &[SessionView]) -> Vec<Group> {
 }
 
 fn sort_by_recency(rows: &mut [SessionView]) {
-    // last_activity_secs: smaller = more recent → sort ascending
-    rows.sort_by_key(|r| r.last_activity_secs);
+    // Order by the user's most recent prompt (smallest age = newest on top),
+    // sessions without a prompt last, then id as a stable final tiebreaker.
+    // Keyed on prompt time — NOT last_activity — so an agent firing tool hooks
+    // every second doesn't constantly jump to the top of its group.
+    rows.sort_by(|a, b| {
+        a.last_prompt_age_secs
+            .unwrap_or(u64::MAX)
+            .cmp(&b.last_prompt_age_secs.unwrap_or(u64::MAX))
+            .then_with(|| a.id.cmp(&b.id))
+    });
 }
 
 // ── Selection ─────────────────────────────────────────────────────────────────
@@ -217,6 +225,8 @@ mod tests {
             last_activity_secs: secs,
             busy_secs: 0,
             last_prompt: None,
+            // `secs` represents prompt-recency in these tests (the sort key).
+            last_prompt_age_secs: Some(secs),
             host_app: None,
             host_bundle_id: None,
             terminal_session_id: None,
@@ -271,12 +281,39 @@ mod tests {
 
     #[test]
     fn within_group_sorted_by_recency_ascending() {
-        // smaller last_activity_secs = more recent = comes first
+        // smaller last_prompt_age_secs = more recent prompt = comes first
         let sessions = vec![sv("working", 30), sv("working", 5), sv("working", 60)];
         let groups = group_and_sort(&sessions);
-        assert_eq!(groups[0].rows[0].last_activity_secs, 5);
-        assert_eq!(groups[0].rows[1].last_activity_secs, 30);
-        assert_eq!(groups[0].rows[2].last_activity_secs, 60);
+        assert_eq!(groups[0].rows[0].last_prompt_age_secs, Some(5));
+        assert_eq!(groups[0].rows[1].last_prompt_age_secs, Some(30));
+        assert_eq!(groups[0].rows[2].last_prompt_age_secs, Some(60));
+    }
+
+    #[test]
+    fn order_ignores_last_activity_uses_prompt_time() {
+        // A busy agent (last_activity = 0s, firing tool hooks constantly) but with
+        // an OLD prompt must NOT jump above a session whose prompt is more recent.
+        let mut busy = sv("working", 0); // last_activity_secs = 0 (just fired a hook)
+        busy.id = "busy".to_string();
+        busy.last_prompt_age_secs = Some(300); // but prompted 5 min ago
+        let mut fresh = sv("working", 50); // last_activity older
+        fresh.id = "fresh".to_string();
+        fresh.last_prompt_age_secs = Some(10); // prompted 10s ago
+        let groups = group_and_sort(&[busy, fresh]);
+        assert_eq!(groups[0].rows[0].id, "fresh", "most recent prompt on top");
+        assert_eq!(groups[0].rows[1].id, "busy");
+    }
+
+    #[test]
+    fn no_prompt_sessions_sort_last() {
+        let mut prompted = sv("working", 100);
+        prompted.id = "prompted".to_string();
+        let mut never = sv("working", 0);
+        never.id = "never".to_string();
+        never.last_prompt_age_secs = None; // never prompted
+        let groups = group_and_sort(&[never, prompted]);
+        assert_eq!(groups[0].rows[0].id, "prompted");
+        assert_eq!(groups[0].rows[1].id, "never", "no-prompt session sorts last");
     }
 
     #[test]

@@ -176,6 +176,11 @@ pub struct SessionView {
     /// First prompt the user submitted in this session (used as mid column summary).
     #[serde(default)]
     pub last_prompt: Option<String>,
+    /// Seconds since the user's most recent prompt (UserPromptSubmit). `None` if
+    /// the user has not prompted yet. Drives stable within-group ordering
+    /// (smallest = most recent on top); changes only when the user sends a message.
+    #[serde(default)]
+    pub last_prompt_age_secs: Option<u64>,
 
     // ── Phase 4: jump locator fields ────────────────────────────────────
     #[serde(default)]
@@ -300,6 +305,7 @@ mod tests {
             last_activity_secs: 5,
             busy_secs: 0,
             last_prompt: None,
+            last_prompt_age_secs: None,
             host_app: None,
             host_bundle_id: None,
             terminal_session_id: None,
