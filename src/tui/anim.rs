@@ -1,0 +1,237 @@
+//! Animation state: spinner, breathing, heartbeat, relative-time formatting.
+//!
+//! All functions are pure (take `elapsed_secs: f64`), making them trivially testable
+//! without faking a clock. The `Anim` struct holds the start `Instant` and hands
+//! `elapsed()` to each pure helper on every tick.
+
+use std::time::Instant;
+
+// ── Spinner ───────────────────────────────────────────────────────────────────
+
+/// Braille spinner frames (10 frames, ~90 ms/frame → full cycle ~0.9 s).
+pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// ASCII fallback for terminals that don't render braille.
+pub const SPINNER_FRAMES_ASCII: &[&str] = &["|", "/", "-", "\\"];
+
+const SPINNER_FRAME_SECS: f64 = 0.090; // 90 ms per frame
+const SPINNER_CYCLE: f64 = SPINNER_FRAME_SECS * SPINNER_FRAMES.len() as f64; // ~0.9 s
+
+/// Return the braille spinner frame for the given elapsed seconds.
+/// `elapsed` is seconds since the animation origin.
+pub fn spinner_frame(elapsed: f64) -> &'static str {
+    let idx = ((elapsed % SPINNER_CYCLE) / SPINNER_FRAME_SECS) as usize;
+    let idx = idx.min(SPINNER_FRAMES.len() - 1);
+    SPINNER_FRAMES[idx]
+}
+
+/// ASCII fallback spinner frame.
+pub fn spinner_frame_ascii(elapsed: f64) -> &'static str {
+    const CYCLE: f64 = 0.090 * SPINNER_FRAMES_ASCII.len() as f64;
+    let idx = ((elapsed % CYCLE) / 0.090) as usize;
+    let idx = idx.min(SPINNER_FRAMES_ASCII.len() - 1);
+    SPINNER_FRAMES_ASCII[idx]
+}
+
+// ── Breathing (Approval) ──────────────────────────────────────────────────────
+
+const BREATHE_PERIOD: f64 = 1.4; // 1.4 s ease-in-out cycle
+
+/// Return a brightness value in [0.0, 1.0] for the Approval breathing animation.
+/// Uses a half-cosine wave for ease-in-out feel.
+pub fn breathe(elapsed: f64) -> f32 {
+    let phase = (elapsed % BREATHE_PERIOD) / BREATHE_PERIOD; // 0..1
+    // Half-cosine: 0→1→0 (smooth)
+    // cos(2π·phase) goes 1→−1→1; remap to 0→1→0
+    let t = (1.0 - (2.0 * std::f64::consts::PI * phase).cos()) / 2.0;
+    t as f32
+}
+
+// ── Heartbeat ────────────────────────────────────────────────────────────────
+
+const HEARTBEAT_PERIOD: f64 = 1.6; // 1.6 s cycle
+const HEARTBEAT_ON_FRACTION: f64 = 0.55; // "亮 ~55% 后闪灭"
+
+/// Returns `true` when the header heartbeat dot should be lit.
+pub fn heartbeat(elapsed: f64) -> bool {
+    let phase = (elapsed % HEARTBEAT_PERIOD) / HEARTBEAT_PERIOD; // 0..1
+    phase < HEARTBEAT_ON_FRACTION
+}
+
+// ── Relative time ─────────────────────────────────────────────────────────────
+
+/// Format a duration in seconds as a human-friendly relative string.
+/// < 60 s → "Ns", < 3600 s → "Nm", else "Nh".
+pub fn relative_time(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3600)
+    }
+}
+
+// ── Anim aggregator ───────────────────────────────────────────────────────────
+
+/// Holds the origin `Instant` and exposes per-tick accessors.
+#[derive(Debug)]
+pub struct Anim {
+    start: Instant,
+}
+
+impl Anim {
+    pub fn new() -> Self {
+        Anim {
+            start: Instant::now(),
+        }
+    }
+
+    fn elapsed(&self) -> f64 {
+        self.start.elapsed().as_secs_f64()
+    }
+
+    /// Current braille spinner frame.
+    pub fn spinner(&self) -> &'static str {
+        spinner_frame(self.elapsed())
+    }
+
+    /// Brightness [0,1] for Approval breathing.
+    pub fn breathe(&self) -> f32 {
+        breathe(self.elapsed())
+    }
+
+    /// Whether the header heartbeat dot is lit.
+    pub fn heartbeat(&self) -> bool {
+        heartbeat(self.elapsed())
+    }
+}
+
+impl Default for Anim {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── relative_time ──────────────────────────────────────────────────────
+
+    #[test]
+    fn relative_time_zero() {
+        assert_eq!(relative_time(0), "0s");
+    }
+
+    #[test]
+    fn relative_time_seconds() {
+        assert_eq!(relative_time(1), "1s");
+        assert_eq!(relative_time(59), "59s");
+    }
+
+    #[test]
+    fn relative_time_boundary_minutes() {
+        assert_eq!(relative_time(60), "1m");
+        assert_eq!(relative_time(90), "1m");
+        assert_eq!(relative_time(3599), "59m");
+    }
+
+    #[test]
+    fn relative_time_hours() {
+        assert_eq!(relative_time(3600), "1h");
+        assert_eq!(relative_time(7200), "2h");
+        assert_eq!(relative_time(3601), "1h");
+    }
+
+    // ── spinner_frame ──────────────────────────────────────────────────────
+
+    #[test]
+    fn spinner_frame_at_zero_is_first() {
+        assert_eq!(spinner_frame(0.0), SPINNER_FRAMES[0]);
+    }
+
+    #[test]
+    fn spinner_frame_advances_every_90ms() {
+        for (i, expected) in SPINNER_FRAMES.iter().enumerate() {
+            let t = i as f64 * 0.090 + 0.001; // slightly past boundary
+            assert_eq!(spinner_frame(t), *expected, "frame {i} at t={t:.3}");
+        }
+    }
+
+    #[test]
+    fn spinner_frame_wraps_at_cycle_end() {
+        let one_cycle = SPINNER_FRAME_SECS * SPINNER_FRAMES.len() as f64;
+        assert_eq!(spinner_frame(one_cycle), spinner_frame(0.0));
+    }
+
+    #[test]
+    fn spinner_frame_returns_valid_braille() {
+        for i in 0..SPINNER_FRAMES.len() {
+            let t = i as f64 * SPINNER_FRAME_SECS + 0.001;
+            let f = spinner_frame(t);
+            // All braille frames are single Unicode scalar values in ⠀–⣿
+            let ch = f.chars().next().unwrap();
+            assert!(
+                ('\u{2800}'..='\u{28FF}').contains(&ch),
+                "expected braille char, got {ch:?}"
+            );
+        }
+    }
+
+    // ── breathe ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn breathe_at_zero_is_near_zero() {
+        // At t=0, cos(0)=1 → (1-1)/2 = 0
+        let b = breathe(0.0);
+        assert!(b.abs() < 0.01, "expected ~0, got {b}");
+    }
+
+    #[test]
+    fn breathe_at_half_period_is_near_one() {
+        // At t=half period, cos(π)=−1 → (1−(−1))/2 = 1
+        let b = breathe(BREATHE_PERIOD / 2.0);
+        assert!((b - 1.0).abs() < 0.01, "expected ~1, got {b}");
+    }
+
+    #[test]
+    fn breathe_is_in_range() {
+        for i in 0..100 {
+            let t = i as f64 * BREATHE_PERIOD / 100.0;
+            let b = breathe(t);
+            assert!((0.0..=1.0).contains(&b), "breathe({t}) = {b} out of range");
+        }
+    }
+
+    // ── heartbeat ────────────────────────────────────────────────────────
+
+    #[test]
+    fn heartbeat_on_at_start() {
+        assert!(heartbeat(0.0));
+    }
+
+    #[test]
+    fn heartbeat_off_after_55_pct() {
+        // at 56% of period it should be off
+        let t = HEARTBEAT_PERIOD * 0.56;
+        assert!(!heartbeat(t));
+    }
+
+    #[test]
+    fn heartbeat_wraps() {
+        // After one full period it should behave like t=0
+        assert_eq!(heartbeat(HEARTBEAT_PERIOD), heartbeat(0.0));
+    }
+
+    // ── Anim struct ───────────────────────────────────────────────────────
+
+    #[test]
+    fn anim_new_does_not_panic() {
+        let a = Anim::new();
+        let _ = a.spinner();
+        let _ = a.breathe();
+        let _ = a.heartbeat();
+    }
+}
