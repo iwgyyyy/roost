@@ -167,6 +167,47 @@ pub fn uninstall_claude_from(home_dir: &std::path::Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// True if roost hooks are already present in the Claude settings or, failing
+/// that, the Codex hooks file. Used to decide whether to offer setup on first
+/// run. Missing files / parse errors are treated as "not installed".
+pub fn hooks_installed() -> bool {
+    let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) else {
+        return false;
+    };
+    let home = Path::new(&home);
+
+    let claude = home.join(".claude").join("settings.json");
+    if let Ok(Some(v)) = read_settings(&claude)
+        && config_has_roost_hook(&v, is_roost_entry)
+    {
+        return true;
+    }
+
+    let codex = home.join(".codex").join("hooks.json");
+    if let Ok(Some(v)) = read_settings(&codex)
+        && config_has_roost_hook(&v, is_codex_roost_group)
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Shared shape check for both agents: a top-level `hooks` object whose event
+/// arrays contain at least one entry/group matching `is_roost` (a roost hook).
+fn config_has_roost_hook(v: &Value, is_roost: fn(&Value) -> bool) -> bool {
+    v.get("hooks")
+        .and_then(|h| h.as_object())
+        .map(|events| {
+            events.values().any(|arr| {
+                arr.as_array()
+                    .map(|items| items.iter().any(is_roost))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn current_exe_path() -> String {
     std::env::current_exe()
         .ok()
@@ -559,6 +600,27 @@ fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_has_roost_hook_detects_installed() {
+        // Claude: after merging, the settings carry a roost hook entry.
+        let claude = merge_claude_hooks(None, "/usr/bin/roost");
+        assert!(config_has_roost_hook(&claude, is_roost_entry));
+        // Codex: after merging, the hooks file carries a roost group.
+        let codex = merge_codex_hooks_json(None, "/usr/bin/roost");
+        assert!(config_has_roost_hook(&codex, is_codex_roost_group));
+    }
+
+    #[test]
+    fn config_has_roost_hook_false_when_absent() {
+        let empty = serde_json::json!({});
+        assert!(!config_has_roost_hook(&empty, is_roost_entry));
+        // A hooks object with only third-party / empty events is not "installed".
+        let no_roost = serde_json::json!({
+            "hooks": { "SessionStart": [], "PostToolUse": [] }
+        });
+        assert!(!config_has_roost_hook(&no_roost, is_roost_entry));
+    }
     use serde_json::json;
 
     // ---------------------------------------------------------------------------

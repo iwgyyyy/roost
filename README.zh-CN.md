@@ -68,6 +68,8 @@ roost
 # 3. 在另一个终端启动 Claude Code 或 Codex 会话——它会立刻出现
 ```
 
+首次运行时，如果还没装 hook，`roost` 会询问是否帮你跑 `roost setup`——所以也可以直接 `roost` 然后确认提示。
+
 ---
 
 ## 命令

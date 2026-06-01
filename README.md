@@ -69,6 +69,9 @@ roost
 # 3. Start a Claude Code or Codex session in another terminal — it appears immediately
 ```
 
+On first run, if hooks aren't installed yet, `roost` offers to run `roost setup`
+for you — so you can also just run `roost` and accept the prompt.
+
 ---
 
 ## Commands
