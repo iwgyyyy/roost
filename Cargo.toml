@@ -2,6 +2,13 @@
 name = "roost"
 version = "0.1.0"
 edition = "2024"
+description = "Watch all your AI coding agents (Claude Code & Codex) from one terminal panel"
+license = "MIT"
+repository = "https://github.com/iwgyyyy/roost"
+homepage = "https://github.com/iwgyyyy/roost"
+readme = "README.md"
+keywords = ["tui", "claude-code", "codex", "agents", "cli"]
+categories = ["command-line-utilities"]
 
 [lib]
 name = "roost"
@@ -26,3 +33,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
