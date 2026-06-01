@@ -200,9 +200,9 @@ fn mid_text(session: &SessionView) -> String {
             .clone()
             .unwrap_or_else(|| session.name.clone()),
         _ => {
-            // Idle / Done: show first_prompt if available, otherwise nothing.
+            // Idle / Done: show last_prompt if available, otherwise nothing.
             // The name is already shown in the name column — don't repeat it here.
-            session.first_prompt.clone().unwrap_or_default()
+            session.last_prompt.clone().unwrap_or_default()
         }
     };
     // Append host label if known (low priority — truncation at render time handles narrow screens)
@@ -624,7 +624,7 @@ mod tests {
             activity: activity.map(str::to_string),
             last_activity_secs: 5,
             busy_secs: 0,
-            first_prompt: None,
+            last_prompt: None,
             host_app: None,
             terminal_session_id: None,
             terminal_tty: None,
@@ -1617,12 +1617,12 @@ mod tests {
         );
     }
 
-    /// Idle-state mid column text (from first_prompt) should have DarkGray fg (secondary).
+    /// Idle-state mid column text (from last_prompt) should have DarkGray fg (secondary).
     #[test]
     fn idle_mid_text_has_dark_gray_fg() {
-        // first_prompt contains a unique char 'Q' not present in any other column.
+        // last_prompt contains a unique char 'Q' not present in any other column.
         let mut session = make_session("s1", "idle", None);
-        session.first_prompt = Some("Qxyzzy task".to_string());
+        session.last_prompt = Some("Qxyzzy task".to_string());
         let plan = layout::columns_for(100);
         let selection = Selection::new();
         let theme = Theme::classic();
@@ -1640,8 +1640,8 @@ mod tests {
             &anim,
         );
 
-        // 'Q' only appears in "Qxyzzy task" (our first_prompt), not in any other column.
-        let col = find_symbol_col(&buf, 100, 0, "Q").expect("'Q' of first_prompt should appear");
+        // 'Q' only appears in "Qxyzzy task" (our last_prompt), not in any other column.
+        let col = find_symbol_col(&buf, 100, 0, "Q").expect("'Q' of last_prompt should appear");
         let fg = cell_fg(&buf, col, 0);
         assert_eq!(
             fg,
@@ -1652,11 +1652,11 @@ mod tests {
 
     // ── Fix C: Done/Idle mid column tests ────────────────────────────────────
 
-    /// Done state with first_prompt: mid column shows the prompt text.
+    /// Done state with last_prompt: mid column shows the prompt text.
     #[test]
-    fn done_with_first_prompt_shows_prompt_in_mid() {
+    fn done_with_last_prompt_shows_prompt_in_mid() {
         let mut session = make_session("s1", "done", None);
-        session.first_prompt = Some("Fix the checkout bug".to_string());
+        session.last_prompt = Some("Fix the checkout bug".to_string());
         let plan = layout::columns_for(100);
         let selection = Selection::new();
         let theme = Theme::classic();
@@ -1683,7 +1683,7 @@ mod tests {
             .collect();
         assert!(
             row.contains("Fix the checkout bug"),
-            "done row with first_prompt should show prompt text in mid column, got: {row:?}"
+            "done row with last_prompt should show prompt text in mid column, got: {row:?}"
         );
         // Must NOT show the repo name (my-repo) a second time in the mid column.
         // The name column already shows it; check the row does not have it twice.
@@ -1694,11 +1694,11 @@ mod tests {
         );
     }
 
-    /// Done state without first_prompt: mid column is empty (no repo name fallback).
+    /// Done state without last_prompt: mid column is empty (no repo name fallback).
     #[test]
-    fn done_without_first_prompt_mid_is_empty_not_name() {
+    fn done_without_last_prompt_mid_is_empty_not_name() {
         let session = make_session("s1", "done", None);
-        // first_prompt is None (the default from make_session)
+        // last_prompt is None (the default from make_session)
         let plan = layout::columns_for(100);
         let selection = Selection::new();
         let theme = Theme::classic();
@@ -1727,7 +1727,7 @@ mod tests {
         let occurrences = row.matches("my-repo").count();
         assert_eq!(
             occurrences, 1,
-            "repo name must appear only once (name col); mid col must be empty for done+no first_prompt, got: {row:?}"
+            "repo name must appear only once (name col); mid col must be empty for done+no last_prompt, got: {row:?}"
         );
     }
 }

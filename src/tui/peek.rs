@@ -698,7 +698,7 @@ mod tests {
             activity: Some("run: git push --force".to_string()),
             last_activity_secs: 8,
             busy_secs: 0,
-            first_prompt: None,
+            last_prompt: None,
             host_app: None,
             terminal_session_id: None,
             terminal_tty: None,

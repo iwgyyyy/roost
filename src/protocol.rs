@@ -166,7 +166,7 @@ pub struct SessionView {
     pub busy_secs: u64,
     /// First prompt the user submitted in this session (used as mid column summary).
     #[serde(default)]
-    pub first_prompt: Option<String>,
+    pub last_prompt: Option<String>,
 
     // ── Phase 4: jump locator fields ────────────────────────────────────
     #[serde(default)]
@@ -286,7 +286,7 @@ mod tests {
             activity: Some("思考中…".to_string()),
             last_activity_secs: 5,
             busy_secs: 0,
-            first_prompt: None,
+            last_prompt: None,
             host_app: None,
             terminal_session_id: None,
             terminal_tty: None,

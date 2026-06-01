@@ -130,7 +130,7 @@ impl DaemonState {
                     activity: s.activity.clone(),
                     last_activity_secs: elapsed,
                     busy_secs: busy.as_secs(),
-                    first_prompt: s.first_prompt.clone(),
+                    last_prompt: s.last_prompt.clone(),
                     host_app: s.host_app.clone(),
                     terminal_session_id: s.terminal_session_id.clone(),
                     terminal_tty: s.terminal_tty.clone(),

@@ -292,7 +292,7 @@ mod tests {
             activity: None,
             last_activity_secs: 0,
             busy_secs: 0,
-            first_prompt: None,
+            last_prompt: None,
             host_app: Some(host.to_string()),
             terminal_session_id: Some("sess-abc".to_string()),
             terminal_tty: Some("/dev/ttys001".to_string()),

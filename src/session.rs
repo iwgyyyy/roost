@@ -163,7 +163,7 @@ pub struct AgentSession {
     pub term_program: Option<String>,
     pub state: AgentState,
     pub activity: Option<String>,
-    pub first_prompt: Option<String>,
+    pub last_prompt: Option<String>,
     pub done_summary: Option<String>,
     pub last_activity: Instant,
     pub events: VecDeque<StoredEvent>,
@@ -203,7 +203,7 @@ impl AgentSession {
             term_program: None,
             state: AgentState::Idle,
             activity: None,
-            first_prompt: None,
+            last_prompt: None,
             done_summary: None,
             last_activity: Instant::now(),
             events: VecDeque::with_capacity(MAX_EVENTS),
@@ -317,8 +317,8 @@ impl AgentSession {
                 self.state = AgentState::Working;
                 self.activity = Some("thinking…".to_string());
                 self.awaiting_clarify = false;
-                if self.first_prompt.is_none() {
-                    self.first_prompt = ev.prompt.clone();
+                if ev.prompt.is_some() {
+                    self.last_prompt = ev.prompt.clone();
                 }
                 false
             }
@@ -407,8 +407,8 @@ impl AgentSession {
             EventKind::UserPromptSubmit => {
                 self.state = AgentState::Working;
                 self.activity = Some("thinking…".to_string());
-                if self.first_prompt.is_none() {
-                    self.first_prompt = ev.prompt.clone();
+                if ev.prompt.is_some() {
+                    self.last_prompt = ev.prompt.clone();
                 }
                 false
             }
@@ -669,13 +669,13 @@ mod tests {
         assert_eq!(session.state, AgentState::Working);
         assert_eq!(session.activity.as_deref(), Some("thinking…"));
         assert_eq!(
-            session.first_prompt.as_deref(),
+            session.last_prompt.as_deref(),
             Some("Fix the checkout bug")
         );
     }
 
     #[test]
-    fn first_prompt_only_set_once() {
+    fn last_prompt_tracks_most_recent() {
         let start_ev = make_event(EventKind::SessionStart);
         let mut session = AgentSession::new(&start_ev);
         session.apply(&start_ev);
@@ -688,7 +688,8 @@ mod tests {
         ev2.prompt = Some("Second prompt".to_string());
         session.apply(&ev2);
 
-        assert_eq!(session.first_prompt.as_deref(), Some("First prompt"));
+        // Each prompt updates last_prompt, so it reflects the most recent one.
+        assert_eq!(session.last_prompt.as_deref(), Some("Second prompt"));
     }
 
     #[test]
@@ -872,7 +873,7 @@ mod tests {
         assert!(!remove);
         assert_eq!(s.state, AgentState::Working);
         assert_eq!(s.activity.as_deref(), Some("thinking…"));
-        assert_eq!(s.first_prompt.as_deref(), Some("Do the thing"));
+        assert_eq!(s.last_prompt.as_deref(), Some("Do the thing"));
     }
 
     #[test]

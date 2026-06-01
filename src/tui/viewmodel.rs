@@ -216,7 +216,7 @@ mod tests {
             activity: None,
             last_activity_secs: secs,
             busy_secs: 0,
-            first_prompt: None,
+            last_prompt: None,
             host_app: None,
             terminal_session_id: None,
             terminal_tty: None,
