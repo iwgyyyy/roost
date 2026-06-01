@@ -9,3 +9,4 @@ pub mod session;
 pub mod setup;
 pub mod sock;
 pub mod tui;
+pub mod update;

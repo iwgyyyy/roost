@@ -30,6 +30,8 @@ pub enum Commands {
     },
     /// List currently tracked agent sessions
     List,
+    /// Update roost to the latest release (installs from the install script only)
+    Update,
 }
 
 pub fn run() -> Result<()> {
@@ -72,5 +74,6 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Some(Commands::List) => roost::list::run_list(),
+        Some(Commands::Update) => roost::update::run_update(),
     }
 }

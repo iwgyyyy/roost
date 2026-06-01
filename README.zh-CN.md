@@ -48,6 +48,8 @@ curl -fsSL https://github.com/iwgyyyy/roost/releases/latest/download/roost-insta
 cargo install --git https://github.com/iwgyyyy/roost
 ```
 
+脚本安装的，**更新**直接 `roost update`（或重跑上面的 curl 命令）。源码安装的用 `cargo install … --force` 更新。
+
 ---
 
 ## 快速开始
@@ -72,6 +74,7 @@ roost
 | `roost setup` | 安装 hook 到 `~/.claude/settings.json`（找到 `~/.codex/` 则一并安装）。幂等。 |
 | `roost setup --uninstall` | 移除 roost 的 hook。保留你其它所有 hook / 配置。 |
 | `roost list` | 以文本表格打印当前会话（调试 / 脚本用）。 |
+| `roost update` | 就地更新到最新版本（仅适用于脚本安装）。 |
 | `roost daemon` | 在前台运行后台 daemon。通常由 `roost` 自动启动。 |
 | `roost hook <family> <event>` | 由 agent 的 hook 调用——向 daemon 发送一个事件后立即退出。 |
 

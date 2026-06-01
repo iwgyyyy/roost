@@ -48,6 +48,9 @@ curl -fsSL https://github.com/iwgyyyy/roost/releases/latest/download/roost-insta
 cargo install --git https://github.com/iwgyyyy/roost
 ```
 
+To **update** an install done via the script, run `roost update` (or just re-run
+the curl command). Source installs update with `cargo install … --force`.
+
 ---
 
 ## Quick start
@@ -72,6 +75,7 @@ roost
 | `roost setup` | Install hooks into `~/.claude/settings.json` (and `~/.codex/` if found). Idempotent. |
 | `roost setup --uninstall` | Remove roost hooks. Preserves all other existing hooks/config. |
 | `roost list` | Print current sessions as a text table (debug / scripting). |
+| `roost update` | Update to the latest release in place (script installs only). |
 | `roost daemon` | Run the background daemon in the foreground. Normally started automatically by `roost`. |
 | `roost hook <family> <event>` | Called by agent hooks — sends one event to the daemon then exits immediately. |
 
