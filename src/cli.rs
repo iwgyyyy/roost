@@ -54,6 +54,12 @@ pub fn run() -> Result<()> {
                     Ok(None) => println!("Codex not found — skipping Codex uninstall."),
                     Err(e) => eprintln!("Warning: Codex uninstall failed: {e}"),
                 }
+
+                match roost::setup::uninstall_deepseek() {
+                    Ok(Some(dir)) => println!("Removed DeepSeek hooks from {}", dir.display()),
+                    Ok(None) => println!("DeepSeek (CodeWhale) not found — skipping."),
+                    Err(e) => eprintln!("Warning: DeepSeek uninstall failed: {e}"),
+                }
                 Ok(())
             } else {
                 install_hooks()
@@ -83,6 +89,20 @@ fn install_hooks() -> Result<()> {
             );
         }
         Err(e) => eprintln!("Warning: Codex setup failed: {e}"),
+    }
+
+    println!();
+    match roost::setup::install_deepseek() {
+        Ok(Some(dir)) => {
+            println!("Installed DeepSeek (CodeWhale) hooks in {}", dir.display());
+            println!("Restart CodeWhale for hooks to take effect.");
+        }
+        Ok(None) => {
+            println!(
+                "DeepSeek (CodeWhale) not found (~/.codewhale missing) — install it first, then re-run `roost setup`."
+            );
+        }
+        Err(e) => eprintln!("Warning: DeepSeek setup failed: {e}"),
     }
     Ok(())
 }

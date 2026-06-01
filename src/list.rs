@@ -75,6 +75,7 @@ pub fn print_sessions(views: &[SessionView]) {
         let family_icon = match v.family {
             crate::protocol::AgentFamily::Claude => "✻",
             crate::protocol::AgentFamily::Codex => "⬡",
+            crate::protocol::AgentFamily::Deepseek => "≈",
             crate::protocol::AgentFamily::Unknown => "◆",
         };
 

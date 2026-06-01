@@ -190,6 +190,15 @@ pub fn hooks_installed() -> bool {
         return true;
     }
 
+    for sub in [".codewhale", ".deepseek"] {
+        let cw = home.join(sub).join("config.toml");
+        if let Ok(content) = std::fs::read_to_string(&cw)
+            && deepseek_config_has_roost_hook(&content)
+        {
+            return true;
+        }
+    }
+
     false
 }
 
@@ -595,6 +604,192 @@ fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// DeepSeek / CodeWhale setup
+// ---------------------------------------------------------------------------
+
+/// CodeWhale hook events roost registers, paired with the roost EventKind name
+/// embedded in the hook command. CodeWhale fires snake_case lifecycle events;
+/// the command argument uses roost's canonical EventKind names so `hook.rs`
+/// parses them unchanged. CodeWhale has no turn-completion event, so there is
+/// no `Stop`/Done mapping (see `session::apply` dispatch comment).
+const DEEPSEEK_EVENTS: &[(&str, &str)] = &[
+    ("session_start", "SessionStart"),
+    ("message_submit", "UserPromptSubmit"),
+    ("tool_call_before", "PreToolUse"),
+    ("tool_call_after", "PostToolUse"),
+    ("session_end", "SessionEnd"),
+];
+
+/// Merge roost hooks into a CodeWhale `config.toml` string.
+///
+/// Sets `[hooks] enabled = true` and appends one `[[hooks.hooks]]` table per
+/// event. Idempotent (no duplicate roost entries on re-run); preserves the
+/// user's own hooks, formatting, and comments via `toml_edit`.
+pub fn merge_deepseek_hooks_toml(config_toml: &str, roost_bin: &str) -> Result<String> {
+    use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
+
+    let mut doc: DocumentMut = config_toml
+        .parse()
+        .context("failed to parse CodeWhale config.toml")?;
+
+    // Ensure [hooks] table and enable the feature.
+    if !doc.contains_table("hooks") {
+        doc["hooks"] = Item::Table(Table::new());
+    }
+    doc["hooks"]["enabled"] = value(true);
+
+    // Ensure hooks.hooks is an array-of-tables.
+    let needs_aot = doc["hooks"]
+        .as_table()
+        .map(|t| {
+            t.get("hooks")
+                .and_then(|i| i.as_array_of_tables())
+                .is_none()
+        })
+        .unwrap_or(true);
+    if needs_aot {
+        doc["hooks"]["hooks"] = Item::ArrayOfTables(ArrayOfTables::new());
+    }
+    let aot = doc["hooks"]["hooks"]
+        .as_array_of_tables_mut()
+        .expect("hooks.hooks is an array-of-tables");
+
+    for (cw_event, roost_event) in DEEPSEEK_EVENTS {
+        let command = format!("{roost_bin} hook deepseek {roost_event}");
+        let exists = aot
+            .iter()
+            .any(|t| t.get("command").and_then(|c| c.as_str()) == Some(command.as_str()));
+        if !exists {
+            let mut t = Table::new();
+            t.insert("event", value(*cw_event));
+            t.insert("command", value(command));
+            aot.push(t);
+        }
+    }
+
+    Ok(doc.to_string())
+}
+
+/// Remove roost-managed `[[hooks.hooks]]` entries from a CodeWhale config.toml.
+/// Preserves the user's own hook entries. If no hooks remain after removal,
+/// reverts `enabled = false` (so uninstall does not leave the feature on for a
+/// user who never had hooks); otherwise leaves `enabled` untouched.
+pub fn remove_deepseek_hooks_toml(config_toml: &str) -> Result<String> {
+    use toml_edit::{ArrayOfTables, DocumentMut, value};
+
+    let mut doc: DocumentMut = config_toml
+        .parse()
+        .context("failed to parse CodeWhale config.toml")?;
+
+    let Some(hooks_tbl) = doc.get_mut("hooks").and_then(|i| i.as_table_mut()) else {
+        return Ok(doc.to_string());
+    };
+    if let Some(aot) = hooks_tbl
+        .get_mut("hooks")
+        .and_then(|i| i.as_array_of_tables_mut())
+    {
+        let mut kept = ArrayOfTables::new();
+        for t in aot.iter() {
+            let is_roost = t
+                .get("command")
+                .and_then(|c| c.as_str())
+                .map(|c| c.contains(ROOST_MARKER))
+                .unwrap_or(false);
+            if !is_roost {
+                kept.push(t.clone());
+            }
+        }
+        let empty = kept.is_empty();
+        *aot = kept;
+        if empty {
+            hooks_tbl["enabled"] = value(false);
+        }
+    }
+
+    Ok(doc.to_string())
+}
+
+/// True if a CodeWhale config.toml carries at least one roost hook entry.
+fn deepseek_config_has_roost_hook(config_toml: &str) -> bool {
+    let Ok(doc) = config_toml.parse::<toml_edit::DocumentMut>() else {
+        return false;
+    };
+    doc.get("hooks")
+        .and_then(|h| h.as_table())
+        .and_then(|t| t.get("hooks"))
+        .and_then(|i| i.as_array_of_tables())
+        .map(|aot| {
+            aot.iter().any(|t| {
+                t.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.contains(ROOST_MARKER))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Resolve the CodeWhale config directory: `~/.codewhale` (preferred) or the
+/// legacy `~/.deepseek` compatibility dir. Returns `Ok(None)` if neither exists
+/// (CodeWhale not installed / never run).
+fn resolve_deepseek_dir() -> Result<Option<PathBuf>> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .context("HOME not set")?;
+    for sub in [".codewhale", ".deepseek"] {
+        let p = PathBuf::from(&home).join(sub);
+        if p.exists() {
+            return Ok(Some(p));
+        }
+    }
+    Ok(None)
+}
+
+/// Install CodeWhale hooks using the real HOME.
+/// Returns Ok(None) if no CodeWhale config dir exists (not installed).
+pub fn install_deepseek() -> Result<Option<PathBuf>> {
+    let roost_bin = current_exe_path();
+    match resolve_deepseek_dir()? {
+        Some(dir) => install_deepseek_into(&dir, &roost_bin),
+        None => Ok(None),
+    }
+}
+
+/// Install CodeWhale hooks into an explicit config dir (e.g. `~/.codewhale`).
+pub fn install_deepseek_into(config_dir: &Path, roost_bin: &str) -> Result<Option<PathBuf>> {
+    let config_path = config_dir.join("config.toml");
+    let existing = if config_path.exists() {
+        std::fs::read_to_string(&config_path)?
+    } else {
+        String::new()
+    };
+    let updated = merge_deepseek_hooks_toml(&existing, roost_bin)?;
+    write_file_atomic(&config_path, &updated)?;
+    Ok(Some(config_dir.to_path_buf()))
+}
+
+/// Uninstall CodeWhale hooks using the real HOME.
+pub fn uninstall_deepseek() -> Result<Option<PathBuf>> {
+    match resolve_deepseek_dir()? {
+        Some(dir) => uninstall_deepseek_from(&dir),
+        None => Ok(None),
+    }
+}
+
+/// Uninstall CodeWhale hooks from an explicit config dir.
+pub fn uninstall_deepseek_from(config_dir: &Path) -> Result<Option<PathBuf>> {
+    let config_path = config_dir.join("config.toml");
+    if config_path.exists() {
+        let existing = std::fs::read_to_string(&config_path)?;
+        if !existing.trim().is_empty() {
+            let cleaned = remove_deepseek_hooks_toml(&existing)?;
+            write_file_atomic(&config_path, &cleaned)?;
+        }
+    }
+    Ok(Some(config_dir.to_path_buf()))
 }
 
 #[cfg(test)]
@@ -1022,6 +1217,133 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // DeepSeek / CodeWhale TOML setup tests
+    // ---------------------------------------------------------------------------
+
+    /// Count roost `[[hooks.hooks]]` entries in a parsed CodeWhale config.
+    fn deepseek_roost_count(config_toml: &str) -> usize {
+        let doc: toml_edit::DocumentMut = config_toml.parse().unwrap();
+        doc.get("hooks")
+            .and_then(|h| h.as_table())
+            .and_then(|t| t.get("hooks"))
+            .and_then(|i| i.as_array_of_tables())
+            .map(|aot| {
+                aot.iter()
+                    .filter(|t| {
+                        t.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(|c| c.contains(ROOST_MARKER))
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn merge_deepseek_from_empty_registers_all_events_and_enables() {
+        let result = merge_deepseek_hooks_toml("", "/usr/bin/roost").unwrap();
+        let doc: toml_edit::DocumentMut = result.parse().unwrap();
+        assert_eq!(
+            doc["hooks"]["enabled"].as_bool(),
+            Some(true),
+            "hooks must be enabled"
+        );
+        assert_eq!(
+            deepseek_roost_count(&result),
+            DEEPSEEK_EVENTS.len(),
+            "one roost entry per event"
+        );
+        // Command uses the deepseek family + roost EventKind names.
+        assert!(result.contains("/usr/bin/roost hook deepseek SessionStart"));
+        assert!(result.contains("/usr/bin/roost hook deepseek UserPromptSubmit"));
+        assert!(result.contains("event = \"tool_call_before\""));
+    }
+
+    #[test]
+    fn merge_deepseek_is_idempotent() {
+        let r1 = merge_deepseek_hooks_toml("", "/usr/bin/roost").unwrap();
+        let r2 = merge_deepseek_hooks_toml(&r1, "/usr/bin/roost").unwrap();
+        assert_eq!(
+            deepseek_roost_count(&r2),
+            DEEPSEEK_EVENTS.len(),
+            "re-running setup must not duplicate roost entries"
+        );
+    }
+
+    #[test]
+    fn merge_deepseek_preserves_user_hooks_and_config() {
+        let existing = "\
+provider = \"deepseek\"
+
+[hooks]
+enabled = true
+
+[[hooks.hooks]]
+event = \"session_start\"
+command = \"echo my-own-hook\"
+";
+        let result = merge_deepseek_hooks_toml(existing, "/usr/bin/roost").unwrap();
+        // User's top-level config preserved.
+        let doc: toml_edit::DocumentMut = result.parse().unwrap();
+        assert_eq!(doc["provider"].as_str(), Some("deepseek"));
+        // User's own hook preserved.
+        assert!(result.contains("echo my-own-hook"), "user hook must survive");
+        // roost entries added.
+        assert_eq!(deepseek_roost_count(&result), DEEPSEEK_EVENTS.len());
+    }
+
+    #[test]
+    fn remove_deepseek_strips_roost_keeps_user() {
+        let installed = merge_deepseek_hooks_toml(
+            "[[hooks.hooks]]\nevent = \"session_start\"\ncommand = \"echo my-own-hook\"\n",
+            "/usr/bin/roost",
+        )
+        .unwrap();
+        let cleaned = remove_deepseek_hooks_toml(&installed).unwrap();
+        assert_eq!(deepseek_roost_count(&cleaned), 0, "roost entries removed");
+        assert!(
+            cleaned.contains("echo my-own-hook"),
+            "user hook must be preserved"
+        );
+        // User had a hook, so the feature stays enabled.
+        let doc: toml_edit::DocumentMut = cleaned.parse().unwrap();
+        assert_eq!(doc["hooks"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn remove_deepseek_disables_when_no_hooks_left() {
+        // roost-only install: after uninstall, the feature is reverted to false.
+        let installed = merge_deepseek_hooks_toml("", "/usr/bin/roost").unwrap();
+        let cleaned = remove_deepseek_hooks_toml(&installed).unwrap();
+        assert_eq!(deepseek_roost_count(&cleaned), 0);
+        let doc: toml_edit::DocumentMut = cleaned.parse().unwrap();
+        assert_eq!(
+            doc["hooks"]["enabled"].as_bool(),
+            Some(false),
+            "enable flag reverted when no hooks remain"
+        );
+    }
+
+    #[test]
+    fn deepseek_event_names_parse_correctly() {
+        use crate::hook::parse_event_kind;
+        for (_cw, roost_event) in DEEPSEEK_EVENTS {
+            assert!(
+                parse_event_kind(roost_event).is_ok(),
+                "DeepSeek event '{roost_event}' written by setup must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn deepseek_config_has_roost_hook_detects() {
+        let installed = merge_deepseek_hooks_toml("", "/usr/bin/roost").unwrap();
+        assert!(deepseek_config_has_roost_hook(&installed));
+        assert!(!deepseek_config_has_roost_hook("provider = \"deepseek\"\n"));
     }
 
     #[test]

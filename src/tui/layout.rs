@@ -23,7 +23,7 @@ pub struct ColumnPlan {
     pub selbar: Option<u16>,
     /// 2-column family icon (✻ / ⬡ / ◆).
     pub icon: Option<u16>,
-    /// 7-column family label (e.g. "Claude", "Codex"). Hidden on terminals < 60 cols.
+    /// 9-column family label (fits "DeepSeek"; "Claude"/"Codex"). Hidden on terminals < 60 cols.
     /// Width includes 1 space gap after the label (6 chars + 1 gap = 7).
     pub family: Option<u16>,
     /// Name column (git repo basename).
@@ -93,13 +93,13 @@ pub fn columns_for(width: u16) -> ColumnPlan {
     }
 
     if width < 80 {
-        // 60–79: selbar·icon·family(7)·name(12)·glyph·mid·time
-        let fixed = 2 /* selbar */ + 2 /* icon */ + 7 /* family */ + 12 /* name */ + 1 /* glyph */ + 8 /* time */ + 4; /* gaps */
+        // 60–79: selbar·icon·family(9)·name(12)·glyph·mid·time
+        let fixed = 2 /* selbar */ + 2 /* icon */ + 9 /* family */ + 12 /* name */ + 1 /* glyph */ + 8 /* time */ + 4; /* gaps */
         let mid_w = width.saturating_sub(fixed);
         return ColumnPlan {
             selbar: Some(2),
             icon: Some(2),
-            family: Some(7),
+            family: Some(9),
             name: 12,
             glyph: 1,
             label: None,
@@ -110,13 +110,13 @@ pub fn columns_for(width: u16) -> ColumnPlan {
     }
 
     if width < 100 {
-        // 80–99: selbar·icon·family(7)·name(16)·glyph·mid·time (no label)
-        let fixed = 2 /* selbar */ + 2 /* icon */ + 7 /* family */ + 16 /* name */ + 1 /* glyph */ + 8 /* time */ + 4; /* gaps */
+        // 80–99: selbar·icon·family(9)·name(16)·glyph·mid·time (no label)
+        let fixed = 2 /* selbar */ + 2 /* icon */ + 9 /* family */ + 16 /* name */ + 1 /* glyph */ + 8 /* time */ + 4; /* gaps */
         let mid_w = width.saturating_sub(fixed);
         return ColumnPlan {
             selbar: Some(2),
             icon: Some(2),
-            family: Some(7),
+            family: Some(9),
             name: 16,
             glyph: 1,
             label: None,
@@ -126,10 +126,10 @@ pub fn columns_for(width: u16) -> ColumnPlan {
         };
     }
 
-    // ≥ 100: full layout — selbar·icon·family(7)·name(16)·glyph·label·mid·time
+    // ≥ 100: full layout — selbar·icon·family(9)·name(16)·glyph·label·mid·time
     let fixed = 2 /* selbar */
         + 2 /* icon */
-        + 7 /* family */
+        + 9 /* family */
         + 16 /* name */
         + 1 /* glyph */
         + 10 /* label */
@@ -139,7 +139,7 @@ pub fn columns_for(width: u16) -> ColumnPlan {
     ColumnPlan {
         selbar: Some(2),
         icon: Some(2),
-        family: Some(7),
+        family: Some(9),
         name: 16,
         glyph: 1,
         label: Some(10),
@@ -301,12 +301,12 @@ mod tests {
         assert!(!plan.too_small);
         assert_eq!(plan.selbar, Some(2));
         assert_eq!(plan.icon, Some(2));
-        assert_eq!(plan.family, Some(7));
+        assert_eq!(plan.family, Some(9));
         assert_eq!(plan.name, 16);
         assert_eq!(plan.glyph, 1);
         assert_eq!(plan.label, Some(10));
         assert!(plan.time.is_some());
-        // mid = 120 - (2+2+7+16+1+10+4+5) = 73 — must be ≥ 50 with family column
+        // mid = 120 - (2+2+9+16+1+10+8+5) = 67 — must be ≥ 50 with family column
         assert!(plan.mid.unwrap() >= 50, "mid={}", plan.mid.unwrap());
     }
 
@@ -314,8 +314,8 @@ mod tests {
     fn columns_for_100_is_full() {
         let plan = columns_for(100);
         assert_eq!(plan.label, Some(10));
-        assert_eq!(plan.family, Some(7));
-        // mid = 100 - 47 = 53 — must be ≥ 50
+        assert_eq!(plan.family, Some(9));
+        // mid = 100 - 53 = 47, clamped to the ≥ 50 floor
         assert!(plan.mid.unwrap() >= 50);
     }
 
@@ -324,11 +324,11 @@ mod tests {
         let plan = columns_for(80);
         assert_eq!(plan.label, None);
         assert_eq!(plan.icon, Some(2));
-        assert_eq!(plan.family, Some(7));
+        assert_eq!(plan.family, Some(9));
         assert_eq!(plan.time, Some(8));
         assert!(plan.mid.is_some());
-        // mid = 80 - (2+2+7+16+1+8+4) = 40
-        assert_eq!(plan.mid.unwrap(), 40, "mid={}", plan.mid.unwrap());
+        // mid = 80 - (2+2+9+16+1+8+4) = 38
+        assert_eq!(plan.mid.unwrap(), 38, "mid={}", plan.mid.unwrap());
     }
 
     #[test]
@@ -336,21 +336,21 @@ mod tests {
         let plan = columns_for(99);
         assert_eq!(plan.label, None);
         assert_eq!(plan.icon, Some(2));
-        assert_eq!(plan.family, Some(7));
-        // mid = 99 - (2+2+7+16+1+8+4) = 59
-        assert_eq!(plan.mid.unwrap(), 59, "mid={}", plan.mid.unwrap());
+        assert_eq!(plan.family, Some(9));
+        // mid = 99 - (2+2+9+16+1+8+4) = 57
+        assert_eq!(plan.mid.unwrap(), 57, "mid={}", plan.mid.unwrap());
     }
 
     #[test]
     fn columns_for_60_no_label() {
         let plan = columns_for(60);
         assert_eq!(plan.label, None);
-        assert_eq!(plan.family, Some(7));
+        assert_eq!(plan.family, Some(9));
         assert_eq!(plan.name, 12);
         assert!(plan.mid.is_some());
         assert_eq!(plan.time, Some(8));
-        // mid = 60 - (2+2+7+12+1+8+4) = 24
-        assert_eq!(plan.mid.unwrap(), 24, "mid={}", plan.mid.unwrap());
+        // mid = 60 - (2+2+9+12+1+8+4) = 22
+        assert_eq!(plan.mid.unwrap(), 22, "mid={}", plan.mid.unwrap());
     }
 
     #[test]
@@ -383,8 +383,8 @@ mod tests {
             let plan = columns_for(width);
             assert_eq!(
                 plan.family,
-                Some(7),
-                "family should be Some(7) at width={width}"
+                Some(9),
+                "family should be Some(9) at width={width}"
             );
         }
     }

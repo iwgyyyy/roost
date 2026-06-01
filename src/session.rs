@@ -280,7 +280,16 @@ impl AgentSession {
 
         let remove = match &ev.family {
             AgentFamily::Codex => self.apply_codex(ev),
-            _ => self.apply_claude(ev),
+            // DeepSeek/CodeWhale fires the same lifecycle events as Claude
+            // (session_start / message_submit / tool_call_before / tool_call_after
+            // / session_end → mapped to roost EventKinds in setup), and its
+            // clarify tool is `request_user_input` (already in `is_clarify_tool`),
+            // so it reuses the Claude state machine verbatim. Caveat: CodeWhale
+            // has no turn-completion hook, so a DeepSeek session stays Working
+            // until the next prompt or `session_end` — there is no Done state.
+            AgentFamily::Claude | AgentFamily::Deepseek | AgentFamily::Unknown => {
+                self.apply_claude(ev)
+            }
         };
 
         // Update busy timer based on the transition:

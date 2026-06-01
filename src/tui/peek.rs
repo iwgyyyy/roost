@@ -31,7 +31,7 @@ use crate::protocol::SessionDetail;
 use crate::tui::{
     anim,
     layout::{pad_to_width, truncate_to_width},
-    theme::{self, COLOR_ACCENT, Theme},
+    theme::{self, Theme},
 };
 
 // ── render_peek ───────────────────────────────────────────────────────────────
@@ -90,12 +90,12 @@ pub fn render_peek(
         let fill = "─".repeat(fill_avail);
         let header = format!("{left}{label}{label_suffix}{fill}{right_cap}");
         buf.set_string(x0, y0, &header, Style::default().fg(theme.border));
-        // "peek" keyword in accent (semantic — brand colour).
+        // "peek" keyword in the session's family colour (matches the list accent).
         buf.set_string(
             x0 + UnicodeWidthStr::width("╭─ ") as u16,
             y0,
             "peek",
-            Style::default().fg(COLOR_ACCENT),
+            Style::default().fg(theme::family_color(&detail.family)),
         );
         // Repo name in terminal default fg (adaptive, readable on light & dark).
         buf.set_string(

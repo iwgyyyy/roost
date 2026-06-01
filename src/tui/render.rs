@@ -48,7 +48,9 @@ pub fn render_row(
         && x < right
     {
         let glyph = if selected { "▌" } else { " " };
-        let style = Style::default().fg(theme::COLOR_ACCENT);
+        // Selection bar takes the selected row's family colour, matching the
+        // dynamic `roost` title accent.
+        let style = Style::default().fg(theme::family_color(&session.family));
         buf.set_string(x, y, glyph, style);
         x += w;
     }
@@ -255,6 +257,7 @@ pub fn render_header(
     daemon_ready: bool,
     anim: &Anim,
     theme: &Theme,
+    accent: Color,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -293,12 +296,7 @@ pub fn render_header(
     buf.set_string(x, y, &line, Style::default().fg(theme.border));
     // Colour "roost" in accent
     let roost_x = x + 3; // after "╭─ "
-    buf.set_string(
-        roost_x,
-        y,
-        "roost",
-        Style::default().fg(theme::COLOR_ACCENT),
-    );
+    buf.set_string(roost_x, y, "roost", Style::default().fg(accent));
     // Colour the heartbeat dot
     if daemon_ready && agent_count > 0 {
         // dot_pos is measured in display columns (not bytes)
@@ -455,6 +453,20 @@ pub struct RenderState<'a> {
     pub jump_status: Option<&'a str>,
 }
 
+/// Family of the currently selected session, if any — drives the dynamic accent.
+fn selected_family<'a>(state: &'a RenderState<'_>) -> Option<&'a crate::protocol::AgentFamily> {
+    let mut flat = 0usize;
+    for g in state.groups {
+        for row in &g.rows {
+            if state.selection.is_selected(flat) {
+                return Some(&row.family);
+            }
+            flat += 1;
+        }
+    }
+    None
+}
+
 /// Render the entire TUI into `buf` using `area` as the full screen.
 pub fn render_frame(buf: &mut Buffer, area: Rect, state: &RenderState<'_>) {
     if area.height < 2 || area.width < 10 {
@@ -473,6 +485,11 @@ pub fn render_frame(buf: &mut Buffer, area: Rect, state: &RenderState<'_>) {
         width: area.width,
         height: 1,
     };
+    // Dynamic accent: the `roost` title follows the selected session's family
+    // colour. Falls back to the static accent when nothing is selected.
+    let accent = selected_family(state)
+        .map(|f| theme::family_color(f))
+        .unwrap_or(theme::COLOR_ACCENT);
     render_header(
         buf,
         header_area,
@@ -480,6 +497,7 @@ pub fn render_frame(buf: &mut Buffer, area: Rect, state: &RenderState<'_>) {
         state.daemon_ready,
         state.anim,
         state.theme,
+        accent,
     );
 
     // Footer row (last row)

@@ -21,7 +21,10 @@ pub const COLOR_IDLE: Color = Color::Rgb(0x76, 0x83, 0x90);
 // ── Family colours ───────────────────────────────────────────────────────────
 
 pub const COLOR_CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
-pub const COLOR_CODEX: Color = Color::Rgb(0xc3, 0xcc, 0xd6);
+// Terminal default foreground: renders black on light terminals, white on dark
+// ones — adaptive, unlike a hardcoded near-white that washes out on light bg.
+pub const COLOR_CODEX: Color = Color::Reset;
+pub const COLOR_DEEPSEEK: Color = Color::Rgb(0x4d, 0x6b, 0xfe); // DeepSeek blue
 pub const COLOR_UNKNOWN: Color = Color::Rgb(0x8b, 0x94, 0x9e);
 
 // ── Accent (selection bar ▌) ─────────────────────────────────────────────────
@@ -45,13 +48,20 @@ pub const COLOR_MID: Color = Color::DarkGray; // tertiary — idle/done activity
 /// The glyph is delegated to `AgentFamily::icon()`; this function adds the
 /// colour, which belongs in the theme layer.
 pub fn family_icon(family: &crate::protocol::AgentFamily) -> (&'static str, Color) {
+    (family.icon(), family_color(family))
+}
+
+/// Per-family foreground colour. Used for the family icon/label, and (via the
+/// selected session) for the dynamic accent on the `roost` title, selection
+/// bar, and peek header.
+pub fn family_color(family: &crate::protocol::AgentFamily) -> Color {
     use crate::protocol::AgentFamily;
-    let color = match family {
+    match family {
         AgentFamily::Claude => COLOR_CLAUDE,
         AgentFamily::Codex => COLOR_CODEX,
+        AgentFamily::Deepseek => COLOR_DEEPSEEK,
         AgentFamily::Unknown => COLOR_UNKNOWN,
-    };
-    (family.icon(), color)
+    }
 }
 
 // ── State glyphs ─────────────────────────────────────────────────────────────
@@ -145,7 +155,16 @@ mod tests {
         let (glyph, color) = family_icon(&AgentFamily::Codex);
         assert_eq!(glyph, "⬡");
         assert_eq!(color, COLOR_CODEX);
-        assert_eq!(color, Color::Rgb(0xc3, 0xcc, 0xd6));
+        // Adaptive: terminal default foreground (black on light, white on dark).
+        assert_eq!(color, Color::Reset);
+    }
+
+    #[test]
+    fn family_icon_deepseek() {
+        let (glyph, color) = family_icon(&AgentFamily::Deepseek);
+        assert_eq!(glyph, "≈");
+        assert_eq!(color, COLOR_DEEPSEEK);
+        assert_eq!(color, Color::Rgb(0x4d, 0x6b, 0xfe));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::sock;
 // ---------------------------------------------------------------------------
 // Agent-family process name patterns (lower-cased).
 // ---------------------------------------------------------------------------
-const AGENT_PROCESS_NAMES: &[&str] = &["claude", "codex", "node", "python"];
+const AGENT_PROCESS_NAMES: &[&str] = &["claude", "codex", "deepseek", "deepseek-tui", "node", "python"];
 
 /// Resolve the agent's pid by walking the parent-process chain from `start_pid`.
 /// Stops when a process name matches a known agent binary (claude/codex).
@@ -56,7 +56,15 @@ where
 /// family: "claude" | "codex"
 /// event_name: e.g. "SessionStart", "PreToolUse", etc.
 pub fn run_hook(family: &str, event_name: &str) -> Result<()> {
-    let stdin_data = read_stdin()?;
+    // CodeWhale (DeepSeek) delivers all context via DEEPSEEK_* env vars and runs
+    // session_start synchronously from its raw-mode TUI, leaving the hook's stdin
+    // attached to the terminal (which never sends EOF). Reading it would block
+    // forever and freeze the TUI, so skip stdin entirely for that family.
+    let stdin_data = if matches!(parse_family(family), AgentFamily::Deepseek) {
+        String::new()
+    } else {
+        read_stdin()?
+    };
     let event = build_hook_event(family, event_name, &stdin_data)?;
 
     let path = sock::socket_path();
@@ -297,6 +305,13 @@ fn collect_locators_inner(env: &HashMap<String, String>, terminal_tty: Option<St
 /// Read all of stdin (hook JSON payload).
 fn read_stdin() -> Result<String> {
     let mut buf = String::new();
+    // Safety net for every family: if stdin is a terminal there is no piped hook
+    // payload, so don't block on read_to_string waiting for an EOF that an
+    // interactive TUI will never send.
+    use std::io::IsTerminal;
+    if io::stdin().is_terminal() {
+        return Ok(String::new());
+    }
     io::stdin().read_to_string(&mut buf)?;
     Ok(buf)
 }
@@ -314,16 +329,30 @@ pub fn build_hook_event(family: &str, event_name: &str, stdin_json: &str) -> Res
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
     };
 
-    let session_id = extract_string(&payload, &["session_id", "sessionId", "id"])
-        .unwrap_or_else(|| format!("unknown-{}", std::process::id()));
+    // CodeWhale (DeepSeek TUI) passes hook context via DEEPSEEK_* environment
+    // variables rather than a stdin JSON payload, so for that family every field
+    // is read from the environment. Other families keep reading the stdin JSON.
+    let is_deepseek = matches!(family, AgentFamily::Deepseek);
+    let env_str = |key: &str| std::env::var(key).ok().filter(|s| !s.is_empty());
 
-    let cwd = extract_string(&payload, &["cwd", "working_directory", "workingDirectory"])
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|p| p.to_str().map(|s| s.to_string()))
-        })
-        .unwrap_or_else(|| "/".to_string());
+    let session_id = if is_deepseek {
+        env_str("DEEPSEEK_SESSION_ID")
+    } else {
+        extract_string(&payload, &["session_id", "sessionId", "id"])
+    }
+    .unwrap_or_else(|| format!("unknown-{}", std::process::id()));
+
+    let cwd = if is_deepseek {
+        env_str("DEEPSEEK_WORKSPACE")
+    } else {
+        extract_string(&payload, &["cwd", "working_directory", "workingDirectory"])
+    }
+    .or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()))
+    })
+    .unwrap_or_else(|| "/".to_string());
 
     // Resolve agent pid only for SessionStart — pid is stable within a session,
     // and resolving it (fork ps on macOS, /proc read on Linux) on every hook event
@@ -335,21 +364,39 @@ pub fn build_hook_event(family: &str, event_name: &str, stdin_json: &str) -> Res
     };
 
     // Extract tool info for PreToolUse/PostToolUse
-    let tool_name = extract_string(&payload, &["tool_name", "toolName", "tool"]);
+    let tool_name = if is_deepseek {
+        env_str("DEEPSEEK_TOOL_NAME")
+    } else {
+        extract_string(&payload, &["tool_name", "toolName", "tool"])
+    };
 
-    let tool_input = payload
-        .get("tool_input")
-        .or_else(|| payload.get("toolInput"))
-        .map(|input| serde_json::to_string(input).unwrap_or_default());
+    // tool_input is a JSON string. For DeepSeek it arrives as DEEPSEEK_TOOL_ARGS
+    // (already JSON), which feeds clarify detection / activity text the same way.
+    let tool_input = if is_deepseek {
+        env_str("DEEPSEEK_TOOL_ARGS")
+    } else {
+        payload
+            .get("tool_input")
+            .or_else(|| payload.get("toolInput"))
+            .map(|input| serde_json::to_string(input).unwrap_or_default())
+    };
 
     // Extract prompt for UserPromptSubmit
-    let prompt = extract_string(
-        &payload,
-        &["prompt", "message", "user_message", "userMessage"],
-    );
+    let prompt = if is_deepseek {
+        env_str("DEEPSEEK_MESSAGE")
+    } else {
+        extract_string(
+            &payload,
+            &["prompt", "message", "user_message", "userMessage"],
+        )
+    };
 
-    // Extract notification text
-    let notification = extract_string(&payload, &["message", "notification", "text", "content"]);
+    // Extract notification text (DeepSeek has no notification event roost uses).
+    let notification = if is_deepseek {
+        None
+    } else {
+        extract_string(&payload, &["message", "notification", "text", "content"])
+    };
 
     // ── Phase 4: collect jump locators + host from real env. Captured on the
     // low-frequency events only (SessionStart and UserPromptSubmit) so the hot
@@ -444,6 +491,7 @@ fn parse_family(s: &str) -> AgentFamily {
     match s.to_lowercase().as_str() {
         "claude" => AgentFamily::Claude,
         "codex" => AgentFamily::Codex,
+        "deepseek" | "codewhale" => AgentFamily::Deepseek,
         _ => AgentFamily::Unknown,
     }
 }
@@ -645,6 +693,8 @@ mod tests {
         assert_eq!(parse_family("claude"), AgentFamily::Claude);
         assert_eq!(parse_family("Claude"), AgentFamily::Claude);
         assert_eq!(parse_family("CODEX"), AgentFamily::Codex);
+        assert_eq!(parse_family("deepseek"), AgentFamily::Deepseek);
+        assert_eq!(parse_family("CodeWhale"), AgentFamily::Deepseek);
         assert_eq!(parse_family("unknown_agent"), AgentFamily::Unknown);
     }
 

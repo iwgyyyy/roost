@@ -45,6 +45,7 @@ pub struct SessionDetail {
 pub enum AgentFamily {
     Claude,
     Codex,
+    Deepseek,
     Unknown,
 }
 
@@ -57,6 +58,7 @@ impl AgentFamily {
         match self {
             AgentFamily::Claude => "✻",
             AgentFamily::Codex => "⬡",
+            AgentFamily::Deepseek => "≈",
             AgentFamily::Unknown => "◆",
         }
     }
@@ -66,6 +68,7 @@ impl AgentFamily {
         match self {
             AgentFamily::Claude => "Claude Code",
             AgentFamily::Codex => "Codex",
+            AgentFamily::Deepseek => "DeepSeek",
             AgentFamily::Unknown => "Unknown",
         }
     }
@@ -75,6 +78,7 @@ impl AgentFamily {
         match self {
             AgentFamily::Claude => "Claude",
             AgentFamily::Codex => "Codex",
+            AgentFamily::Deepseek => "DeepSeek",
             AgentFamily::Unknown => "agent",
         }
     }
