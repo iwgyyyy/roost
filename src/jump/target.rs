@@ -244,6 +244,9 @@ pub struct JumpTarget {
     pub session_id: String,
     /// Canonical host name (use `normalize_host_name` before storing).
     pub host: String,
+    /// Precise macOS bundle id of the host app, when known (e.g. a preview or
+    /// fork variant). Preferred over the descriptor's static bundle id.
+    pub host_bundle_id: Option<String>,
     pub terminal_session_id: Option<String>,
     pub terminal_tty: Option<String>,
     pub tmux_target: Option<String>,
@@ -263,6 +266,7 @@ impl JumpTarget {
         JumpTarget {
             session_id: sv.id.clone(),
             host: normalize_host_name(raw_host),
+            host_bundle_id: sv.host_bundle_id.clone(),
             terminal_session_id: sv.terminal_session_id.clone(),
             terminal_tty: sv.terminal_tty.clone(),
             tmux_target: sv.tmux_target.clone(),
@@ -294,6 +298,7 @@ mod tests {
             busy_secs: 0,
             last_prompt: None,
             host_app: Some(host.to_string()),
+            host_bundle_id: None,
             terminal_session_id: Some("sess-abc".to_string()),
             terminal_tty: Some("/dev/ttys001".to_string()),
             tmux_target: Some("/tmp/tmux|$3".to_string()),

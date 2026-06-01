@@ -700,6 +700,7 @@ mod tests {
             busy_secs: 0,
             last_prompt: None,
             host_app: None,
+            host_bundle_id: None,
             terminal_session_id: None,
             terminal_tty: None,
             tmux_target: None,

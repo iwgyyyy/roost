@@ -69,6 +69,10 @@ pub enum JumpStrategy {
     WarpSqlite,
     /// Use an editor CLI (`code -r <ws>`, `zed <ws>`, etc.).
     EditorCli { cli: String, workspace: String },
+    /// Open a workspace path in an app by bundle id (`open -b <bundle> <ws>`).
+    /// Preferred for editors when a precise bundle id is known: it needs no CLI
+    /// on `PATH` and targets the exact app variant (preview / fork).
+    OpenInApp { bundle_id: String, workspace: String },
     /// Activate the app by bundle id (`open -b <bundle>`).
     ActivateApp { bundle_id: String },
     /// Open a workspace/directory path via the app.
@@ -163,9 +167,24 @@ pub fn plan_jump(target: &JumpTarget) -> JumpStrategy {
                 }
             });
             if let Some(workspace) = ws {
-                let cli = editor_cli_for(&target.host);
-                JumpStrategy::EditorCli { cli, workspace }
-            } else if let Some(bundle) = descriptor.and_then(|d| d.bundle_id) {
+                // Prefer the precise host bundle id (macOS): `open -b <bundle> <ws>`
+                // needs no CLI on PATH and targets the exact app variant
+                // (e.g. Zed Preview, VS Code Insiders). Falls back to the editor
+                // CLI when no bundle id was captured (e.g. on Linux).
+                if let Some(bundle) = target.host_bundle_id.clone() {
+                    JumpStrategy::OpenInApp {
+                        bundle_id: bundle,
+                        workspace,
+                    }
+                } else {
+                    let cli = editor_cli_for(&target.host);
+                    JumpStrategy::EditorCli { cli, workspace }
+                }
+            } else if let Some(bundle) = target
+                .host_bundle_id
+                .as_deref()
+                .or_else(|| descriptor.and_then(|d| d.bundle_id))
+            {
                 JumpStrategy::ActivateApp {
                     bundle_id: bundle.to_string(),
                 }
@@ -214,6 +233,11 @@ pub trait Executor: Send + Sync {
     fn open_url(&self, url: &str) -> bool;
     /// Activate an app by bundle id (macOS `open -b <bundle>`).
     fn activate_app(&self, bundle_id: &str) -> bool;
+    /// Open a path in an app by bundle id (macOS `open -b <bundle> <path>`).
+    /// Default returns false (non-macOS / executors that don't support it).
+    fn open_path_in_app(&self, _bundle_id: &str, _path: &str) -> bool {
+        false
+    }
     /// Run an AppleScript string and return (stdout, success).
     fn run_applescript(&self, script: &str) -> (String, bool);
     /// Open a directory path in Finder / file manager.
@@ -267,6 +291,20 @@ fn execute_strategy(
             ref cli,
             ref workspace,
         } => editors::jump_editor(cli, workspace, executor),
+        JumpStrategy::OpenInApp {
+            ref bundle_id,
+            ref workspace,
+        } => {
+            if executor.open_path_in_app(bundle_id, workspace) {
+                JumpOutcome::Activated {
+                    message: format!(
+                        "Opened {workspace} in {bundle_id} — embedded terminal tab is best-effort"
+                    ),
+                }
+            } else {
+                fallback_activate(target, executor)
+            }
+        }
         JumpStrategy::ActivateApp { ref bundle_id } => {
             if executor.activate_app(bundle_id) {
                 JumpOutcome::Activated {
@@ -295,7 +333,12 @@ fn execute_strategy(
 
 fn fallback_activate(target: &JumpTarget, executor: &dyn Executor) -> JumpOutcome {
     let descriptor = descriptor_for(&target.host);
-    let bundle = descriptor.and_then(|d| d.bundle_id);
+    // Prefer the precise captured bundle id over the descriptor's static one,
+    // so preview / fork variants activate the right app.
+    let bundle = target
+        .host_bundle_id
+        .as_deref()
+        .or_else(|| descriptor.and_then(|d| d.bundle_id));
     if bundle.is_some_and(|b| executor.activate_app(b)) {
         return JumpOutcome::Activated {
             message: format!(
@@ -388,6 +431,12 @@ mod tests {
             self.matches_succeed(bundle_id)
         }
 
+        fn open_path_in_app(&self, bundle_id: &str, path: &str) -> bool {
+            let key = format!("{bundle_id} {path}");
+            self.record(format!("open_path_in_app:{key}"));
+            self.matches_succeed(&key)
+        }
+
         fn run_applescript(&self, script: &str) -> (String, bool) {
             self.record(format!("applescript:{script}"));
             let ok = self.matches_succeed(script);
@@ -404,6 +453,7 @@ mod tests {
         JumpTarget {
             session_id: "sess-1".to_string(),
             host: host.to_string(),
+            host_bundle_id: None,
             terminal_session_id: Some("iterm-sess".to_string()),
             terminal_tty: Some("/dev/ttys001".to_string()),
             tmux_target: Some("/tmp/tmux-1000/default,42,0|%3".to_string()),
@@ -511,6 +561,42 @@ mod tests {
         assert!(
             matches!(s, JumpStrategy::EditorCli { ref cli, .. } if cli == "zed"),
             "expected EditorCli zed, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn plan_jump_editor_with_bundle_id_prefers_open_in_app() {
+        // A precise host bundle id (e.g. Zed Preview) takes priority over the
+        // editor CLI, so jump works without the `zed` CLI on PATH.
+        let mut t = make_target("zed");
+        t.host_bundle_id = Some("dev.zed.Zed-Preview".to_string());
+        let s = plan_jump(&t);
+        assert!(
+            matches!(
+                s,
+                JumpStrategy::OpenInApp { ref bundle_id, .. }
+                    if bundle_id == "dev.zed.Zed-Preview"
+            ),
+            "expected OpenInApp with preview bundle, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn editor_open_in_app_success_gives_activated() {
+        let mut t = make_target("zed");
+        t.host_bundle_id = Some("dev.zed.Zed-Preview".to_string());
+        let exec = MockExecutor::new_succeed_all();
+        let outcome = jump(&t, &exec);
+        assert!(
+            matches!(outcome, JumpOutcome::Activated { .. }),
+            "expected Activated, got: {outcome:?}"
+        );
+        let calls = exec.recorded_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains("open_path_in_app:dev.zed.Zed-Preview")),
+            "should have called open_path_in_app with the preview bundle; calls: {calls:?}"
         );
     }
 

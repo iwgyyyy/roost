@@ -78,6 +78,21 @@ impl Executor for RealExecutor {
         }
     }
 
+    fn open_path_in_app(&self, bundle_id: &str, path: &str) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            let mut cmd = std::process::Command::new("open");
+            cmd.args(["-b", bundle_id, path]);
+            status_detached(cmd)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // No bundle-id concept off macOS; editor CLI path handles those.
+            let _ = (bundle_id, path);
+            false
+        }
+    }
+
     fn run_applescript(&self, script: &str) -> (String, bool) {
         #[cfg(target_os = "macos")]
         {

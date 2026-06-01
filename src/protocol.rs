@@ -117,6 +117,11 @@ pub struct HookEvent {
     /// The detected host application (e.g. "ghostty", "iterm2", "cursor", "warp").
     #[serde(default)]
     pub host_app: Option<String>,
+    /// Precise macOS bundle id of the host app (from `__CFBundleIdentifier`),
+    /// e.g. "dev.zed.Zed-Preview". Used for accurate `open -b` jump regardless
+    /// of stable/preview/fork variants. `None` on Linux.
+    #[serde(default)]
+    pub host_bundle_id: Option<String>,
     /// Terminal session id provided by the host (iTerm2 / Ghostty).
     #[serde(default)]
     pub terminal_session_id: Option<String>,
@@ -172,6 +177,8 @@ pub struct SessionView {
     #[serde(default)]
     pub host_app: Option<String>,
     #[serde(default)]
+    pub host_bundle_id: Option<String>,
+    #[serde(default)]
     pub terminal_session_id: Option<String>,
     #[serde(default)]
     pub terminal_tty: Option<String>,
@@ -206,6 +213,7 @@ mod tests {
             prompt: None,
             notification: None,
             host_app: None,
+            host_bundle_id: None,
             terminal_session_id: None,
             terminal_tty: None,
             tmux_target: None,
@@ -251,6 +259,7 @@ mod tests {
             prompt: None,
             notification: None,
             host_app: None,
+            host_bundle_id: None,
             terminal_session_id: None,
             terminal_tty: None,
             tmux_target: None,
@@ -288,6 +297,7 @@ mod tests {
             busy_secs: 0,
             last_prompt: None,
             host_app: None,
+            host_bundle_id: None,
             terminal_session_id: None,
             terminal_tty: None,
             tmux_target: None,

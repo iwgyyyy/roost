@@ -181,6 +181,7 @@ pub struct AgentSession {
 
     // ── Phase 4: jump locator fields (§14) ───────────────────────────────
     pub host_app: Option<String>,
+    pub host_bundle_id: Option<String>,
     pub terminal_session_id: Option<String>,
     pub terminal_tty: Option<String>,
     pub tmux_target: Option<String>,
@@ -212,6 +213,7 @@ impl AgentSession {
             active_accum: Duration::ZERO,
             active_since: None,
             host_app: ev.host_app.clone(),
+            host_bundle_id: ev.host_bundle_id.clone(),
             terminal_session_id: ev.terminal_session_id.clone(),
             terminal_tty: ev.terminal_tty.clone(),
             tmux_target: ev.tmux_target.clone(),
@@ -253,6 +255,7 @@ impl AgentSession {
             };
         }
         update_opt!(host_app);
+        update_opt!(host_bundle_id);
         update_opt!(terminal_session_id);
         update_opt!(terminal_tty);
         update_opt!(tmux_target);
@@ -557,6 +560,7 @@ mod tests {
             prompt: None,
             notification: None,
             host_app: None,
+            host_bundle_id: None,
             terminal_session_id: None,
             terminal_tty: None,
             tmux_target: None,
@@ -840,6 +844,7 @@ mod tests {
             prompt: None,
             notification: None,
             host_app: None,
+            host_bundle_id: None,
             terminal_session_id: None,
             terminal_tty: None,
             tmux_target: None,
@@ -1037,6 +1042,7 @@ mod tests {
             prompt: None,
             notification: None,
             host_app: None,
+            host_bundle_id: None,
             terminal_session_id: None,
             terminal_tty: None,
             tmux_target: None,

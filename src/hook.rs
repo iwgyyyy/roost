@@ -294,18 +294,6 @@ fn collect_locators_inner(env: &HashMap<String, String>, terminal_tty: Option<St
     }
 }
 
-/// Collect locators from the real process environment.
-fn collect_locators_from_real_env() -> Locators {
-    let env: HashMap<String, String> = std::env::vars().collect();
-    collect_locators(&env)
-}
-
-/// Detect host from the real process environment.
-fn detect_host_from_real_env() -> String {
-    let env: HashMap<String, String> = std::env::vars().collect();
-    detect_host(&env)
-}
-
 /// Read all of stdin (hook JSON payload).
 fn read_stdin() -> Result<String> {
     let mut buf = String::new();
@@ -363,10 +351,16 @@ pub fn build_hook_event(family: &str, event_name: &str, stdin_json: &str) -> Res
     // Extract notification text
     let notification = extract_string(&payload, &["message", "notification", "text", "content"]);
 
-    // ── Phase 4: collect jump locators from real env (only on SessionStart to
-    // avoid per-hook overhead; locators are stable within a session).
+    // ── Phase 4: collect jump locators + host from real env. Captured on the
+    // low-frequency events only (SessionStart and UserPromptSubmit) so the hot
+    // PreToolUse/PostToolUse path adds nothing; capturing on UserPromptSubmit
+    // (not just SessionStart) means a session whose SessionStart the daemon
+    // missed — daemon restarted, or hooks installed after the agent started —
+    // recovers its host/locators the next time the user submits a prompt.
+    // The env map is built once and shared by detect_host + collect_locators.
     let (
         host_app,
+        host_bundle_id,
         terminal_session_id,
         terminal_tty,
         tmux_target,
@@ -375,9 +369,19 @@ pub fn build_hook_event(family: &str, event_name: &str, stdin_json: &str) -> Res
         workspace_path,
         codex_thread_id,
         pane_title,
-    ) = if matches!(kind, EventKind::SessionStart) {
-        let host = detect_host_from_real_env();
-        let loc = collect_locators_from_real_env();
+    ) = if matches!(
+        kind,
+        EventKind::SessionStart | EventKind::UserPromptSubmit
+    ) {
+        let env: HashMap<String, String> = std::env::vars().collect();
+        let host = detect_host(&env);
+        let loc = collect_locators(&env);
+        // Precise host bundle id (macOS): exact app identity, e.g. a preview or
+        // fork variant the static descriptor doesn't know.
+        let bundle = env
+            .get("__CFBundleIdentifier")
+            .filter(|s| !s.is_empty())
+            .cloned();
 
         // For Codex.app: thread id = session_id
         let codex_tid = if host == "codex" {
@@ -388,6 +392,7 @@ pub fn build_hook_event(family: &str, event_name: &str, stdin_json: &str) -> Res
 
         (
             Some(host),
+            bundle,
             loc.terminal_session_id,
             loc.terminal_tty,
             loc.tmux_target,
@@ -398,7 +403,7 @@ pub fn build_hook_event(family: &str, event_name: &str, stdin_json: &str) -> Res
             loc.pane_title,
         )
     } else {
-        (None, None, None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None, None, None)
     };
 
     Ok(HookEvent {
@@ -412,6 +417,7 @@ pub fn build_hook_event(family: &str, event_name: &str, stdin_json: &str) -> Res
         prompt,
         notification,
         host_app,
+        host_bundle_id,
         terminal_session_id,
         terminal_tty,
         tmux_target,

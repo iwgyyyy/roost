@@ -42,6 +42,7 @@ fn make_event(kind: EventKind, session_id: &str, cwd: &str) -> HookEvent {
         prompt: None,
         notification: None,
         host_app: None,
+        host_bundle_id: None,
         terminal_session_id: None,
         terminal_tty: None,
         tmux_target: None,
