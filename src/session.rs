@@ -223,6 +223,17 @@ impl AgentSession {
         }
     }
 
+    /// Cumulative active ("busy") duration: the accumulator plus the current
+    /// active segment if one is open. When the session is not active (Done /
+    /// Idle), `active_since` is `None`, so this value is frozen — it stops
+    /// counting and resumes only when the session becomes active again.
+    pub fn busy_duration(&self, now: Instant) -> Duration {
+        match self.active_since {
+            Some(since) => self.active_accum + now.duration_since(since),
+            None => self.active_accum,
+        }
+    }
+
     /// Apply a hook event to this session. Returns true if the session should be removed.
     pub fn apply(&mut self, ev: &HookEvent) -> bool {
         let now = Instant::now();

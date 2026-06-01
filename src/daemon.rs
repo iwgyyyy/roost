@@ -49,7 +49,10 @@ impl DaemonState {
     /// Build a `SessionDetail` for the given session id, or `None` if not found.
     pub fn session_detail(&self, session_id: &str, now: Instant) -> Option<SessionDetail> {
         let s = self.sessions.get(session_id)?;
-        let elapsed = now.duration_since(s.last_activity).as_secs();
+        // `since` mirrors the list's busy timer: cumulative active time that
+        // freezes once the session is Done/Idle (rather than counting up forever
+        // as "time since last activity" did).
+        let elapsed = s.busy_duration(now).as_secs();
 
         // Build recent events in reverse-chronological order (newest first).
         // duration_secs for each event = time until the next (older) event,
@@ -118,12 +121,7 @@ impl DaemonState {
             .values()
             .map(|s| {
                 let elapsed = now.duration_since(s.last_activity).as_secs();
-                // Cumulative busy time: accumulator + current active segment (if any).
-                let busy = if let Some(since) = s.active_since {
-                    s.active_accum + now.duration_since(since)
-                } else {
-                    s.active_accum
-                };
+                let busy = s.busy_duration(now);
                 SessionView {
                     id: s.id.clone(),
                     family: s.family.clone(),
@@ -423,6 +421,53 @@ mod tests {
         // approval should come first
         assert_eq!(views[0].state, "approval");
         assert_eq!(views[1].state, "working");
+    }
+
+    /// Regression: a Done session's peek `since` must FREEZE — once the agent
+    /// stops, it had no open active segment, so the value must not keep counting
+    /// up as `now` advances.
+    #[test]
+    fn detail_since_is_frozen_when_done() {
+        use crate::protocol::{AgentFamily, EventKind, HookEvent};
+        use std::time::Duration;
+
+        let start_ev = HookEvent {
+            kind: EventKind::SessionStart,
+            family: AgentFamily::Claude,
+            session_id: "s1".to_string(),
+            cwd: "/tmp".to_string(),
+            pid: None,
+            tool_name: None,
+            tool_input: None,
+            prompt: None,
+            notification: None,
+            host_app: None,
+            terminal_session_id: None,
+            terminal_tty: None,
+            tmux_target: None,
+            wezterm_pane: None,
+            zellij_session: None,
+            workspace_path: None,
+            codex_thread_id: None,
+            pane_title: None,
+        };
+
+        let mut state = DaemonState::new();
+        let mut s = AgentSession::new(&start_ev);
+        // Done: a fixed amount of accumulated busy time, no open active segment.
+        s.state = AgentState::Done;
+        s.active_accum = Duration::from_secs(42);
+        s.active_since = None;
+        state.sessions.insert("s1".to_string(), s);
+
+        let base = Instant::now();
+        let a = state.session_detail("s1", base).unwrap().since_secs;
+        let b = state
+            .session_detail("s1", base + Duration::from_secs(10))
+            .unwrap()
+            .since_secs;
+        assert_eq!(a, 42, "since should reflect frozen busy time");
+        assert_eq!(a, b, "since must not advance after the session is Done");
     }
 
     /// Regression: completed-step durations in the peek "recent" list must be

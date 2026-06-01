@@ -41,7 +41,24 @@ use crate::tui::{
 /// `detail` is the session detail to display.
 /// If `area` is too small for the minimum layout, renders nothing (caller
 /// should switch to full-screen mode).
-pub fn render_peek(buf: &mut Buffer, area: Rect, detail: &SessionDetail, theme: &Theme) {
+/// Number of recent-event rows that fit in a peek panel of the given height.
+/// `has_action` accounts for the optional `action` field taking one extra row.
+/// Mirrors the fixed "chrome" rows rendered by [`render_peek`].
+pub fn recent_rows_capacity(area_height: u16, has_action: bool) -> usize {
+    // header(1) + agent/path/status/since(4) + action(0|1) + blank(1) + recent-label(1) + footer(1)
+    let chrome = 1 + 4 + has_action as u16 + 1 + 1 + 1;
+    area_height.saturating_sub(chrome) as usize
+}
+
+/// `recent_scroll` is the number of recent events to skip from the top of the
+/// timeline (0 = newest at top). The caller clamps it to a valid range.
+pub fn render_peek(
+    buf: &mut Buffer,
+    area: Rect,
+    detail: &SessionDetail,
+    theme: &Theme,
+    recent_scroll: usize,
+) {
     if area.height < 4 || area.width < 20 {
         return;
     }
@@ -208,12 +225,22 @@ pub fn render_peek(buf: &mut Buffer, area: Rect, detail: &SessionDetail, theme: 
     }
 
     // ── Field: recent events label ──
-    // Section heading: DarkGray + Bold.
+    // Section heading: DarkGray + Bold. When the timeline overflows the panel,
+    // append a "first–last/total" position so scrolling has a visible anchor.
     if row < footer_y {
+        let total = detail.recent_events.len();
+        let cap = recent_rows_capacity(area.height, detail.action.is_some());
+        let label = if total > cap && cap > 0 {
+            let first = recent_scroll + 1;
+            let last = (recent_scroll + cap).min(total);
+            format!("recent  {first}–{last}/{total}")
+        } else {
+            "recent".to_string()
+        };
         render_body_row(
             buf,
             row,
-            "recent",
+            &label,
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
@@ -227,7 +254,7 @@ pub fn render_peek(buf: &mut Buffer, area: Rect, detail: &SessionDetail, theme: 
     // determined — it shows no time prefix (blank, kept aligned) rather than a
     // live counter that would tick every second. The "since" field above
     // already tracks the current step's time live.
-    for ev in &detail.recent_events {
+    for ev in detail.recent_events.iter().skip(recent_scroll) {
         if row >= footer_y {
             break;
         }
@@ -253,7 +280,7 @@ pub fn render_peek(buf: &mut Buffer, area: Rect, detail: &SessionDetail, theme: 
     // ── Footer: ╰─ esc close ───╯ ─────────────────────────────────────────
     {
         let left = "╰─ ";
-        let keys = "esc close";
+        let keys = "↑/↓ scroll · tab next · esc close";
         // One space after keys before fill, matching header style.
         let keys_suffix = " ";
         let right_cap = "─╯";
@@ -327,6 +354,20 @@ mod tests {
         }
     }
 
+    /// Build a detail with N uniquely-named recent events and no `action` row.
+    fn make_detail_with_events(n: usize) -> SessionDetail {
+        let mut d = make_detail();
+        d.action = None;
+        d.recent_events = (0..n)
+            .map(|i| Event {
+                ts_secs: i as u64,
+                summary: format!("EV{i:02}"),
+                duration_secs: if i == 0 { None } else { Some(i as u64) },
+            })
+            .collect();
+        d
+    }
+
     fn cell_symbol(buf: &ratatui::buffer::Buffer, x: u16, y: u16) -> String {
         buf.cell((x, y))
             .map(|c| c.symbol().to_string())
@@ -347,10 +388,73 @@ mod tests {
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|frame| {
             let area = frame.area();
-            render_peek(frame.buffer_mut(), area, detail, &theme);
+            render_peek(frame.buffer_mut(), area, detail, &theme, 0);
         })
         .unwrap();
         term.backend().buffer().clone()
+    }
+
+    fn render_peek_scrolled(
+        width: u16,
+        height: u16,
+        detail: &SessionDetail,
+        scroll: usize,
+    ) -> ratatui::buffer::Buffer {
+        let theme = Theme::classic();
+        let backend = TestBackend::new(width, height);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|frame| {
+            let area = frame.area();
+            render_peek(frame.buffer_mut(), area, detail, &theme, scroll);
+        })
+        .unwrap();
+        term.backend().buffer().clone()
+    }
+
+    fn buf_text(buf: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .map(|(x, y)| cell_symbol(buf, x, y))
+            .collect()
+    }
+
+    // ── Scrolling ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn recent_rows_capacity_accounts_for_chrome() {
+        // chrome = header + 4 fields + blank + recent-label + footer = 8 (no action)
+        assert_eq!(recent_rows_capacity(20, false), 12);
+        // +1 for the action row
+        assert_eq!(recent_rows_capacity(20, true), 11);
+        // Too small for any recent rows
+        assert_eq!(recent_rows_capacity(6, false), 0);
+    }
+
+    #[test]
+    fn peek_scroll_reveals_older_events() {
+        // 8 events, a small panel: scroll=0 shows the newest, scrolling reveals
+        // older ones and drops the newest from view.
+        let detail = make_detail_with_events(8);
+        let (w, h) = (60u16, 12u16); // capacity = 12 - 8 = 4 recent rows
+
+        let top = render_peek_scrolled(w, h, &detail, 0);
+        let top_text = buf_text(&top, w, h);
+        assert!(top_text.contains("EV00"), "scroll=0 should show newest EV00");
+        assert!(
+            !top_text.contains("EV06"),
+            "scroll=0 should not yet show old EV06"
+        );
+
+        let scrolled = render_peek_scrolled(w, h, &detail, 4);
+        let scrolled_text = buf_text(&scrolled, w, h);
+        assert!(
+            !scrolled_text.contains("EV00"),
+            "after scrolling 4, the newest EV00 should be out of view"
+        );
+        assert!(
+            scrolled_text.contains("EV04"),
+            "after scrolling 4, EV04 should be visible"
+        );
     }
 
     // ── Border alignment ────────────────────────────────────────────────────
@@ -630,7 +734,7 @@ mod tests {
             render_frame(frame.buffer_mut(), list_area, &list_state);
 
             // Render peek in lower half
-            render_peek(frame.buffer_mut(), peek_area, &detail, &theme);
+            render_peek(frame.buffer_mut(), peek_area, &detail, &theme, 0);
         })
         .unwrap();
 

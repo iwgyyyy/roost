@@ -328,7 +328,7 @@ pub fn render_footer_border(buf: &mut Buffer, area: Rect, theme: &Theme, peek_op
     let w = area.width as usize;
 
     let keys: String = if peek_open {
-        "↑/↓ j/k select · esc close · q quit".to_string()
+        "↑/↓ scroll · tab switch · esc close · q quit".to_string()
     } else {
         "↑/↓ j/k select · enter peek · o jump · q quit".to_string()
     };

@@ -139,6 +139,30 @@ impl Selection {
         });
     }
 
+    /// Move to the next row, wrapping from the last back to the first.
+    pub fn cycle_next(&mut self, total_rows: usize) {
+        if total_rows == 0 {
+            self.index = None;
+            return;
+        }
+        self.index = Some(match self.index {
+            Some(i) => (i + 1) % total_rows,
+            None => 0,
+        });
+    }
+
+    /// Move to the previous row, wrapping from the first back to the last.
+    pub fn cycle_prev(&mut self, total_rows: usize) {
+        if total_rows == 0 {
+            self.index = None;
+            return;
+        }
+        self.index = Some(match self.index {
+            Some(0) | None => total_rows - 1,
+            Some(i) => i - 1,
+        });
+    }
+
     /// Returns true if the given flat index is currently selected.
     pub fn is_selected(&self, idx: usize) -> bool {
         self.index == Some(idx)
@@ -156,6 +180,32 @@ pub fn total_rows(groups: &[Group]) -> usize {
 mod tests {
     use super::*;
     use crate::protocol::AgentFamily;
+
+    #[test]
+    fn cycle_next_wraps_from_last_to_first() {
+        let mut s = Selection { index: Some(2) };
+        s.cycle_next(3); // last → first
+        assert_eq!(s.index, Some(0));
+        s.cycle_next(3);
+        assert_eq!(s.index, Some(1));
+    }
+
+    #[test]
+    fn cycle_prev_wraps_from_first_to_last() {
+        let mut s = Selection { index: Some(0) };
+        s.cycle_prev(3); // first → last
+        assert_eq!(s.index, Some(2));
+    }
+
+    #[test]
+    fn cycle_handles_empty_and_none() {
+        let mut s = Selection { index: Some(0) };
+        s.cycle_next(0);
+        assert_eq!(s.index, None);
+        let mut s2 = Selection { index: None };
+        s2.cycle_next(3);
+        assert_eq!(s2.index, Some(0));
+    }
 
     fn sv(state: &str, secs: u64) -> SessionView {
         SessionView {

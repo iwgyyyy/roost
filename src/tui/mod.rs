@@ -97,6 +97,8 @@ pub fn run_tui() -> Result<()> {
     // Peek panel state
     let mut peek_open = false;
     let mut peek_detail: Option<SessionDetail> = None;
+    // Number of recent-event rows scrolled past in the peek panel (0 = newest).
+    let mut peek_scroll: usize = 0;
 
     // Jump status: message shown in footer + timestamp for auto-clear
     let mut jump_status: Option<String> = None;
@@ -216,10 +218,27 @@ pub fn run_tui() -> Result<()> {
             jump_status_at = None;
         }
 
+        // Clamp peek scroll to the part of the recent timeline that overflows
+        // the panel, so ↑/↓ can't scroll into empty space.
+        if peek_open {
+            if let Some(ref detail) = peek_detail {
+                let peek_h = match placement {
+                    PeekPlacement::Inline => terminal_height - terminal_height / 2,
+                    PeekPlacement::FullScreen => terminal_height,
+                };
+                let cap = peek::recent_rows_capacity(peek_h, detail.action.is_some());
+                let max_scroll = detail.recent_events.len().saturating_sub(cap);
+                peek_scroll = peek_scroll.min(max_scroll);
+            }
+        } else {
+            peek_scroll = 0;
+        }
+
         let peek_open_snap = peek_open;
         let peek_detail_snap = peek_detail.clone();
         let placement_snap = placement.clone();
         let jump_status_snap = jump_status.as_deref();
+        let peek_scroll_snap = peek_scroll;
         terminal.draw(|frame| {
             let full_area = frame.area();
 
@@ -241,13 +260,25 @@ pub fn run_tui() -> Result<()> {
                         render_frame(frame.buffer_mut(), list_area, &list_state);
                         // Render peek in lower half
                         if let Some(ref detail) = peek_detail_snap {
-                            peek::render_peek(frame.buffer_mut(), peek_area, detail, &theme);
+                            peek::render_peek(
+                                frame.buffer_mut(),
+                                peek_area,
+                                detail,
+                                &theme,
+                                peek_scroll_snap,
+                            );
                         }
                     }
                     PeekPlacement::FullScreen => {
                         // Render peek full-screen
                         if let Some(ref detail) = peek_detail_snap {
-                            peek::render_peek(frame.buffer_mut(), full_area, detail, &theme);
+                            peek::render_peek(
+                                frame.buffer_mut(),
+                                full_area,
+                                detail,
+                                &theme,
+                                peek_scroll_snap,
+                            );
                         }
                     }
                 }
@@ -292,6 +323,7 @@ pub fn run_tui() -> Result<()> {
                                 peek_detail = client::fetch_detail(id);
                             }
                             peek_open = peek_detail.is_some();
+                            peek_scroll = 0;
                         }
                     }
                     KeyAction::ClosePeek => {
@@ -308,6 +340,27 @@ pub fn run_tui() -> Result<()> {
                                 peek_detail = None;
                             }
                         }
+                    }
+                    KeyAction::NextSession | KeyAction::PrevSession => {
+                        // Selection already moved in handle_key. When peek is
+                        // open, switch its detail to the new session and reset
+                        // the scroll position to the newest event.
+                        peek_scroll = 0;
+                        if peek_open && let Some(ref id) = selected_id {
+                            if let Some(detail) = client::fetch_detail(id) {
+                                peek_detail = Some(detail);
+                            } else {
+                                peek_open = false;
+                                peek_detail = None;
+                            }
+                        }
+                    }
+                    KeyAction::ScrollUp => {
+                        peek_scroll = peek_scroll.saturating_sub(1);
+                    }
+                    KeyAction::ScrollDown => {
+                        // Clamped against the panel capacity before rendering.
+                        peek_scroll = peek_scroll.saturating_add(1);
                     }
                     KeyAction::Jump => {
                         // Build JumpTarget from current selection and launch in background
@@ -364,8 +417,15 @@ enum KeyAction {
     TogglePeek,
     /// Close peek (Esc when peek is open).
     ClosePeek,
-    /// Selection moved (↑/↓/j/k); caller should refresh peek if open.
+    /// Selection moved (↑/↓/j/k while peek closed); caller refreshes peek if open.
     SelectionMoved,
+    /// Switch to the next/previous session (`Tab` / `Shift-Tab`); when peek is
+    /// open the caller refreshes the detail and resets the peek scroll.
+    NextSession,
+    PrevSession,
+    /// Scroll the open peek detail's recent timeline (↑/↓ while peek open).
+    ScrollUp,
+    ScrollDown,
     /// Trigger terminal jump for current selection (`o` key).
     Jump,
     /// No special action needed.
@@ -396,12 +456,31 @@ fn handle_key(
         KeyCode::Enter => return KeyAction::TogglePeek,
         // `o` = open / jump to agent's terminal window
         KeyCode::Char('o') => return KeyAction::Jump,
+        // Tab / Shift-Tab always switch the selected session, wrapping around.
+        KeyCode::Tab => {
+            selection.cycle_next(n_rows);
+            *selected_id = current_session_id(selection, groups);
+            return KeyAction::NextSession;
+        }
+        KeyCode::BackTab => {
+            selection.cycle_prev(n_rows);
+            *selected_id = current_session_id(selection, groups);
+            return KeyAction::PrevSession;
+        }
+        // ↑/↓ (and j/k) scroll the detail when peek is open, otherwise move
+        // the selection in the list.
         KeyCode::Down | KeyCode::Char('j') => {
+            if peek_open {
+                return KeyAction::ScrollDown;
+            }
             selection.move_down(n_rows);
             *selected_id = current_session_id(selection, groups);
             return KeyAction::SelectionMoved;
         }
         KeyCode::Up | KeyCode::Char('k') => {
+            if peek_open {
+                return KeyAction::ScrollUp;
+            }
             selection.move_up(n_rows);
             *selected_id = current_session_id(selection, groups);
             return KeyAction::SelectionMoved;
