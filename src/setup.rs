@@ -212,6 +212,7 @@ const CODEX_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
     "Stop",
+    "PreToolUse",
     "PostToolUse",
     "PermissionRequest",
 ];
@@ -237,7 +238,10 @@ fn codex_event_timeout(event: &str) -> u64 {
 
 /// Build a roost hook group entry for Codex hooks.json.
 /// Structure: `{ "hooks": [{"type":"command","command":"…","timeout":N}] }`
-/// PostToolUse additionally carries `"matcher": ""`.
+/// - `PostToolUse` carries `"matcher": ""` (all tools).
+/// - `PreToolUse` carries `"matcher": "request_user_input"` so it fires ONLY for
+///   the clarify question tool, never for ordinary tool calls (zero overhead on
+///   Bash/edits). See `session::CLARIFY_TOOL`.
 fn make_codex_roost_group(command: &str, event: &str) -> Value {
     let timeout = codex_event_timeout(event);
     let hook_obj = serde_json::json!({
@@ -245,15 +249,13 @@ fn make_codex_roost_group(command: &str, event: &str) -> Value {
         "command": command,
         "timeout": timeout,
     });
-    if event == "PostToolUse" {
-        serde_json::json!({
+    match event {
+        "PostToolUse" => serde_json::json!({ "hooks": [hook_obj], "matcher": "" }),
+        "PreToolUse" => serde_json::json!({
             "hooks": [hook_obj],
-            "matcher": "",
-        })
-    } else {
-        serde_json::json!({
-            "hooks": [hook_obj],
-        })
+            "matcher": crate::session::CLARIFY_TOOL,
+        }),
+        _ => serde_json::json!({ "hooks": [hook_obj] }),
     }
 }
 
@@ -644,6 +646,23 @@ mod tests {
             Some(""),
             "PostToolUse group must have matcher:\"\""
         );
+    }
+
+    #[test]
+    fn merge_codex_hooks_pre_tool_use_matches_clarify_only() {
+        // PreToolUse is registered solely to catch the clarify tool, so its
+        // matcher must be exactly request_user_input (not "" / all tools) to
+        // avoid firing on every ordinary tool call.
+        let result = merge_codex_hooks_json(None, "/usr/bin/roost");
+        let arr = codex_event_arr(&result, "PreToolUse");
+        let group = &arr[0];
+        assert_eq!(
+            group.get("matcher").and_then(|v| v.as_str()),
+            Some(crate::session::CLARIFY_TOOL),
+            "PreToolUse matcher must target the clarify tool only"
+        );
+        let cmd = codex_group_command(group).expect("inner command must be present");
+        assert_eq!(cmd, "/usr/bin/roost hook codex PreToolUse");
     }
 
     #[test]

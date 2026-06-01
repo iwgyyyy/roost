@@ -5,6 +5,40 @@ use crate::protocol::{AgentFamily, Event, EventKind, HookEvent};
 
 pub const MAX_EVENTS: usize = 50;
 
+/// Both agents model an interactive "clarify" question card as a tool call whose
+/// `PreToolUse` fires exactly when the card is shown and the turn pauses for the
+/// user. Codex uses `request_user_input`; Claude Code uses `AskUserQuestion`.
+/// Both carry the same `{"questions":[{"question":…,"header":…}]}` payload.
+pub const CLARIFY_TOOL: &str = "request_user_input";
+pub const CLARIFY_TOOL_CLAUDE: &str = "AskUserQuestion";
+
+/// True when this tool name is a clarify question tool (either agent's).
+fn is_clarify_tool(tool_name: Option<&str>) -> bool {
+    matches!(tool_name, Some(t) if t == CLARIFY_TOOL || t == CLARIFY_TOOL_CLAUDE)
+}
+
+/// Build the display label for a clarify card from its tool_input: the first
+/// question's text (falling back to its header), suffixed with `(1/N)` when the
+/// card carries more than one question. The hook only sees the whole card, not
+/// which sub-question is currently focused, so the first one is shown.
+fn extract_question_from_input(input: Option<&str>) -> Option<String> {
+    let input = input?;
+    let v = serde_json::from_str::<serde_json::Value>(input).ok()?;
+    let questions = v.get("questions")?.as_array()?;
+    let n = questions.len();
+    let q0 = questions.first()?;
+    let text = q0
+        .get("question")
+        .and_then(|x| x.as_str())
+        .or_else(|| q0.get("header").and_then(|x| x.as_str()))?;
+    let text = truncate_str(text, 80);
+    if n > 1 {
+        Some(format!("{text} (1/{n})"))
+    } else {
+        Some(text)
+    }
+}
+
 /// Produce a single-line human-readable summary of a `HookEvent`.
 ///
 /// Rules (spec §peek):
@@ -18,7 +52,12 @@ pub fn summarize_event(ev: &HookEvent) -> String {
         EventKind::PreToolUse => {
             let tool = ev.tool_name.as_deref().unwrap_or("");
             let lower = tool.to_lowercase();
-            if lower.contains("edit") || lower.contains("write") || lower.contains("create") {
+            if is_clarify_tool(Some(tool)) {
+                let q = extract_question_from_input(ev.tool_input.as_deref())
+                    .unwrap_or_else(|| "input".to_string());
+                format!("▲ asked: {q}")
+            } else if lower.contains("edit") || lower.contains("write") || lower.contains("create")
+            {
                 let path = extract_path_from_input(ev.tool_input.as_deref())
                     .unwrap_or_else(|| "file".to_string());
                 format!("✎ edited {path}")
@@ -129,6 +168,10 @@ pub struct AgentSession {
     pub last_activity: Instant,
     pub events: VecDeque<StoredEvent>,
     pub edit_count: u32,
+    /// True while a clarify question card (AskUserQuestion / request_user_input)
+    /// is open and awaiting the user's answer. Used to stop a follow-up generic
+    /// "needs your permission" notification from overwriting the question text.
+    pub awaiting_clarify: bool,
 
     // ── Busy timer: cumulative active duration ────────────────────────────
     /// Total accumulated active duration across all completed active segments.
@@ -165,6 +208,7 @@ impl AgentSession {
             last_activity: Instant::now(),
             events: VecDeque::with_capacity(MAX_EVENTS),
             edit_count: 0,
+            awaiting_clarify: false,
             active_accum: Duration::ZERO,
             active_since: None,
             host_app: ev.host_app.clone(),
@@ -255,22 +299,34 @@ impl AgentSession {
             EventKind::SessionStart => {
                 self.state = AgentState::Idle;
                 self.activity = None;
+                self.awaiting_clarify = false;
                 false
             }
             EventKind::UserPromptSubmit => {
                 self.state = AgentState::Working;
                 self.activity = Some("thinking…".to_string());
+                self.awaiting_clarify = false;
                 if self.first_prompt.is_none() {
                     self.first_prompt = ev.prompt.clone();
                 }
                 false
             }
             EventKind::PreToolUse => {
-                self.state = AgentState::Working;
-                self.activity = Some(build_tool_activity(
-                    ev.tool_name.as_deref(),
-                    ev.tool_input.as_deref(),
-                ));
+                // AskUserQuestion → the agent is paused waiting for the user to
+                // answer the card. A generic "needs your permission" Notification
+                // follows; awaiting_clarify keeps it from overwriting the question.
+                if is_clarify_tool(ev.tool_name.as_deref()) {
+                    self.state = AgentState::Question;
+                    self.activity = extract_question_from_input(ev.tool_input.as_deref())
+                        .or_else(|| Some("waiting for your input".to_string()));
+                    self.awaiting_clarify = true;
+                } else {
+                    self.state = AgentState::Working;
+                    self.activity = Some(build_tool_activity(
+                        ev.tool_name.as_deref(),
+                        ev.tool_input.as_deref(),
+                    ));
+                }
                 false
             }
             EventKind::PostToolUse => {
@@ -278,13 +334,21 @@ impl AgentSession {
                 if matches_edit_tool(ev.tool_name.as_deref()) {
                     self.edit_count += 1;
                 }
+                // A clarify tool completing means the user answered the card.
+                if is_clarify_tool(ev.tool_name.as_deref()) {
+                    self.awaiting_clarify = false;
+                }
                 self.state = AgentState::Working;
                 self.activity = Some("thinking…".to_string());
                 false
             }
             EventKind::Notification => {
                 let text = ev.notification.as_deref().unwrap_or("");
-                if is_idle_notification(text) {
+                if self.awaiting_clarify {
+                    // A clarify card is open; the question is already shown. Ignore
+                    // the generic "needs your permission" notification so it does
+                    // not replace the question text with a vague approval prompt.
+                } else if is_idle_notification(text) {
                     // "Claude is waiting for your input" — the turn is over and the
                     // agent is just idling until the next prompt. Not an actionable
                     // question; treat as idle, not NEEDS INPUT.
@@ -302,6 +366,7 @@ impl AgentSession {
             EventKind::Stop => {
                 self.state = AgentState::Done;
                 self.activity = None;
+                self.awaiting_clarify = false;
                 false
             }
             EventKind::SessionEnd => {
@@ -319,7 +384,7 @@ impl AgentSession {
     /// - PostToolUse       → Working (show tool activity if available)
     /// - PermissionRequest → Approval
     /// - Stop              → Done
-    /// - Codex never enters Question
+    /// - PreToolUse(request_user_input) → Question (clarify card; see CLARIFY_TOOL)
     /// - Codex has no SessionEnd (removal via liveness)
     fn apply_codex(&mut self, ev: &HookEvent) -> bool {
         match &ev.kind {
@@ -360,8 +425,22 @@ impl AgentSession {
                 self.activity = None;
                 false
             }
+            EventKind::PreToolUse => {
+                // A clarify card (request_user_input) → the agent is paused
+                // waiting for the user. No Stop fires while it waits, so this
+                // Question state persists until the user answers (UserPromptSubmit
+                // → Working) or the tool completes (PostToolUse → Working).
+                if is_clarify_tool(ev.tool_name.as_deref()) {
+                    self.state = AgentState::Question;
+                    self.activity = extract_question_from_input(ev.tool_input.as_deref())
+                        .or_else(|| Some("waiting for your input".to_string()));
+                }
+                // Non-clarify PreToolUse carries no state change for Codex; the
+                // PostToolUse path drives the working/activity display.
+                false
+            }
             // Codex never fires these — ignore gracefully.
-            EventKind::PreToolUse | EventKind::Notification | EventKind::SessionEnd => false,
+            EventKind::Notification | EventKind::SessionEnd => false,
         }
     }
 }
@@ -476,6 +555,84 @@ mod tests {
             codex_thread_id: None,
             pane_title: None,
         }
+    }
+
+    #[test]
+    fn claude_ask_user_question_yields_question_with_text() {
+        // Claude shows a clarify card via AskUserQuestion; its PreToolUse must put
+        // the session into Question with the question text (not "Using …").
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+
+        let mut ev = make_event(EventKind::PreToolUse);
+        ev.tool_name = Some(CLARIFY_TOOL_CLAUDE.to_string());
+        ev.tool_input =
+            Some(r#"{"questions":[{"header":"风格","question":"你想要哪种风格？"}]}"#.to_string());
+        s.apply(&ev);
+
+        assert_eq!(s.state, AgentState::Question);
+        assert_eq!(s.activity.as_deref(), Some("你想要哪种风格？"));
+        assert!(s.awaiting_clarify);
+    }
+
+    #[test]
+    fn claude_permission_notification_does_not_override_clarify() {
+        // After AskUserQuestion's PreToolUse, Claude fires a generic
+        // "Claude needs your permission" notification. It must NOT replace the
+        // question text while the card is still open.
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+
+        let mut pre = make_event(EventKind::PreToolUse);
+        pre.tool_name = Some(CLARIFY_TOOL_CLAUDE.to_string());
+        pre.tool_input = Some(r#"{"questions":[{"question":"选哪个？"}]}"#.to_string());
+        s.apply(&pre);
+
+        let mut note = make_event(EventKind::Notification);
+        note.notification = Some("Claude needs your permission".to_string());
+        s.apply(&note);
+
+        assert_eq!(s.state, AgentState::Question);
+        assert_eq!(s.activity.as_deref(), Some("选哪个？"));
+    }
+
+    #[test]
+    fn claude_clarify_answer_clears_awaiting_flag() {
+        // PostToolUse(AskUserQuestion) = the user answered → leave clarify.
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+
+        let mut pre = make_event(EventKind::PreToolUse);
+        pre.tool_name = Some(CLARIFY_TOOL_CLAUDE.to_string());
+        pre.tool_input = Some(r#"{"questions":[{"question":"q"}]}"#.to_string());
+        s.apply(&pre);
+        assert!(s.awaiting_clarify);
+
+        let mut post = make_event(EventKind::PostToolUse);
+        post.tool_name = Some(CLARIFY_TOOL_CLAUDE.to_string());
+        s.apply(&post);
+        assert!(!s.awaiting_clarify);
+        assert_eq!(s.state, AgentState::Working);
+    }
+
+    #[test]
+    fn clarify_multi_question_shows_count() {
+        // A card with N>1 questions shows the first question suffixed with (1/N).
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+
+        let mut ev = make_event(EventKind::PreToolUse);
+        ev.tool_name = Some(CLARIFY_TOOL_CLAUDE.to_string());
+        ev.tool_input = Some(
+            r#"{"questions":[{"question":"风格？"},{"question":"歧义？"}]}"#.to_string(),
+        );
+        s.apply(&ev);
+
+        assert_eq!(s.activity.as_deref(), Some("风格？ (1/2)"));
     }
 
     #[test]
@@ -747,16 +904,76 @@ mod tests {
     }
 
     #[test]
-    fn codex_never_question() {
-        // Codex has no Notification event, and PermissionRequest always → Approval, never Question.
+    fn codex_notification_is_noop() {
+        // Codex has no Notification event; if one were somehow fired it must be a
+        // no-op (it is not how Codex surfaces questions — that's the clarify tool).
         let start = make_codex_event(EventKind::SessionStart);
         let mut s = AgentSession::new(&start);
         s.apply(&start);
 
-        // Even if Notification were somehow fired, it's a no-op for Codex.
         let ev = make_codex_event(EventKind::Notification);
         s.apply(&ev);
         assert_ne!(s.state, AgentState::Question);
+    }
+
+    #[test]
+    fn codex_clarify_pretooluse_yields_question() {
+        // Codex shows a clarify card by calling the request_user_input tool; its
+        // PreToolUse must put the session into Question with the question text.
+        let start = make_codex_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+
+        let mut ev = make_codex_event(EventKind::PreToolUse);
+        ev.tool_name = Some(CLARIFY_TOOL.to_string());
+        ev.tool_input = Some(
+            r#"{"questions":[{"header":"测试选择","question":"你想用哪种内容来测试 clarify 卡片？","options":[]}]}"#
+                .to_string(),
+        );
+        let remove = s.apply(&ev);
+
+        assert!(!remove);
+        assert_eq!(s.state, AgentState::Question);
+        assert_eq!(
+            s.activity.as_deref(),
+            Some("你想用哪种内容来测试 clarify 卡片？")
+        );
+    }
+
+    #[test]
+    fn codex_non_clarify_pretooluse_does_not_change_state() {
+        // An ordinary tool's PreToolUse must not flip Codex into Question (only
+        // request_user_input does). State stays whatever it was.
+        let start = make_codex_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        s.state = AgentState::Working;
+
+        let mut ev = make_codex_event(EventKind::PreToolUse);
+        ev.tool_name = Some("Bash".to_string());
+        ev.tool_input = Some(r#"{"command":"ls"}"#.to_string());
+        s.apply(&ev);
+
+        assert_eq!(s.state, AgentState::Working);
+    }
+
+    #[test]
+    fn codex_clarify_then_answer_returns_to_working() {
+        // After the user answers a clarify, Codex fires UserPromptSubmit → the
+        // session must leave Question and resume Working.
+        let start = make_codex_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+
+        let mut clarify = make_codex_event(EventKind::PreToolUse);
+        clarify.tool_name = Some(CLARIFY_TOOL.to_string());
+        clarify.tool_input = Some(r#"{"questions":[{"question":"pick one"}]}"#.to_string());
+        s.apply(&clarify);
+        assert_eq!(s.state, AgentState::Question);
+
+        let answer = make_codex_event(EventKind::UserPromptSubmit);
+        s.apply(&answer);
+        assert_eq!(s.state, AgentState::Working);
     }
 
     #[test]
