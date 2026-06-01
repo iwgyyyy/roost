@@ -42,7 +42,7 @@ roost **不会**启动、代理或控制任何 agent。它完全依靠各 agent 
 
 ```sh
 # curl（macOS arm64/x86_64、Linux x86_64）
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/iwgyyyy/roost/releases/latest/download/roost-installer.sh | sh
+curl -fsSL https://github.com/iwgyyyy/roost/releases/latest/download/roost-installer.sh | sh
 
 # 从源码
 cargo install --git https://github.com/iwgyyyy/roost
