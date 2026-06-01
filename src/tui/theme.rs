@@ -25,6 +25,7 @@ pub const COLOR_CLAUDE: Color = Color::Rgb(0xd9, 0x77, 0x57);
 // ones — adaptive, unlike a hardcoded near-white that washes out on light bg.
 pub const COLOR_CODEX: Color = Color::Reset;
 pub const COLOR_DEEPSEEK: Color = Color::Rgb(0x4d, 0x6b, 0xfe); // DeepSeek blue
+pub const COLOR_CURSOR: Color = Color::Rgb(0x8b, 0x5c, 0xf6); // Cursor violet
 pub const COLOR_UNKNOWN: Color = Color::Rgb(0x8b, 0x94, 0x9e);
 
 // ── Accent (selection bar ▌) ─────────────────────────────────────────────────
@@ -60,6 +61,7 @@ pub fn family_color(family: &crate::protocol::AgentFamily) -> Color {
         AgentFamily::Claude => COLOR_CLAUDE,
         AgentFamily::Codex => COLOR_CODEX,
         AgentFamily::Deepseek => COLOR_DEEPSEEK,
+        AgentFamily::Cursor => COLOR_CURSOR,
         AgentFamily::Unknown => COLOR_UNKNOWN,
     }
 }
@@ -165,6 +167,14 @@ mod tests {
         assert_eq!(glyph, "≈");
         assert_eq!(color, COLOR_DEEPSEEK);
         assert_eq!(color, Color::Rgb(0x4d, 0x6b, 0xfe));
+    }
+
+    #[test]
+    fn family_icon_cursor() {
+        let (glyph, color) = family_icon(&AgentFamily::Cursor);
+        assert_eq!(glyph, "❯");
+        assert_eq!(color, COLOR_CURSOR);
+        assert_eq!(color, Color::Rgb(0x8b, 0x5c, 0xf6));
     }
 
     #[test]

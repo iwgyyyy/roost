@@ -333,17 +333,29 @@ pub fn build_hook_event(family: &str, event_name: &str, stdin_json: &str) -> Res
     // variables rather than a stdin JSON payload, so for that family every field
     // is read from the environment. Other families keep reading the stdin JSON.
     let is_deepseek = matches!(family, AgentFamily::Deepseek);
+    let is_cursor = matches!(family, AgentFamily::Cursor);
     let env_str = |key: &str| std::env::var(key).ok().filter(|s| !s.is_empty());
 
     let session_id = if is_deepseek {
         env_str("DEEPSEEK_SESSION_ID")
     } else {
+        // Cursor sends `session_id` (== conversation_id) in its stdin JSON, so the
+        // standard extraction covers Claude / Codex / Cursor alike.
         extract_string(&payload, &["session_id", "sessionId", "id"])
     }
     .unwrap_or_else(|| format!("unknown-{}", std::process::id()));
 
     let cwd = if is_deepseek {
         env_str("DEEPSEEK_WORKSPACE")
+    } else if is_cursor {
+        // Cursor has no `cwd` field; it sends a `workspace_roots` array. Use the
+        // first root (the primary workspace) for naming / jump.
+        payload
+            .get("workspace_roots")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     } else {
         extract_string(&payload, &["cwd", "working_directory", "workingDirectory"])
     }
@@ -421,7 +433,15 @@ pub fn build_hook_event(family: &str, event_name: &str, stdin_json: &str) -> Res
         EventKind::SessionStart | EventKind::UserPromptSubmit
     ) {
         let env: HashMap<String, String> = std::env::vars().collect();
-        let host = detect_host(&env);
+        // Cursor's agent hook runs in Cursor's own (VS Code-derived) environment,
+        // where detect_host would see VSCODE_* vars but no TERM_PROGRAM=cursor and
+        // misreport "vscode" (shown as "Code"). We know the host from the family,
+        // so pin it to "cursor".
+        let host = if is_cursor {
+            "cursor".to_string()
+        } else {
+            detect_host(&env)
+        };
         let loc = collect_locators(&env);
         // Precise host bundle id (macOS): exact app identity, e.g. a preview or
         // fork variant the static descriptor doesn't know.
@@ -492,6 +512,7 @@ fn parse_family(s: &str) -> AgentFamily {
         "claude" => AgentFamily::Claude,
         "codex" => AgentFamily::Codex,
         "deepseek" | "codewhale" => AgentFamily::Deepseek,
+        "cursor" => AgentFamily::Cursor,
         _ => AgentFamily::Unknown,
     }
 }
@@ -695,6 +716,7 @@ mod tests {
         assert_eq!(parse_family("CODEX"), AgentFamily::Codex);
         assert_eq!(parse_family("deepseek"), AgentFamily::Deepseek);
         assert_eq!(parse_family("CodeWhale"), AgentFamily::Deepseek);
+        assert_eq!(parse_family("cursor"), AgentFamily::Cursor);
         assert_eq!(parse_family("unknown_agent"), AgentFamily::Unknown);
     }
 
@@ -726,6 +748,20 @@ mod tests {
         let json = r#"{"session_id":"s1","cwd":"/repo","tool_name":"Edit","tool_input":{"path":"src/main.rs"}}"#;
         let ev = build_hook_event("claude", "PreToolUse", json).unwrap();
         assert_eq!(ev.tool_name.as_deref(), Some("Edit"));
+        assert!(ev.tool_input.is_some());
+    }
+
+    #[test]
+    fn build_hook_event_cursor_reads_session_workspace_and_tool() {
+        // Cursor stdin JSON: session_id present, no `cwd` (uses workspace_roots[]),
+        // standard tool_name/tool_input. The command arg is roost's EventKind name.
+        let json = r#"{"session_id":"38d4-cursor","prompt":"hi","tool_name":"Grep","tool_input":{"pattern":"clarify"},"workspace_roots":["/Users/yi/project/web","/Users/yi/project/api"],"hook_event_name":"preToolUse"}"#;
+        let ev = build_hook_event("cursor", "PreToolUse", json).unwrap();
+        assert_eq!(ev.family, AgentFamily::Cursor);
+        assert_eq!(ev.session_id, "38d4-cursor");
+        // cwd resolves to the first workspace root.
+        assert_eq!(ev.cwd, "/Users/yi/project/web");
+        assert_eq!(ev.tool_name.as_deref(), Some("Grep"));
         assert!(ev.tool_input.is_some());
     }
 

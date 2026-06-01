@@ -60,6 +60,12 @@ pub fn run() -> Result<()> {
                     Ok(None) => println!("DeepSeek (CodeWhale) not found — skipping."),
                     Err(e) => eprintln!("Warning: DeepSeek uninstall failed: {e}"),
                 }
+
+                match roost::setup::uninstall_cursor() {
+                    Ok(Some(path)) => println!("Removed Cursor hooks from {}", path.display()),
+                    Ok(None) => println!("Cursor not found — skipping."),
+                    Err(e) => eprintln!("Warning: Cursor uninstall failed: {e}"),
+                }
                 Ok(())
             } else {
                 install_hooks()
@@ -103,6 +109,20 @@ fn install_hooks() -> Result<()> {
             );
         }
         Err(e) => eprintln!("Warning: DeepSeek setup failed: {e}"),
+    }
+
+    println!();
+    match roost::setup::install_cursor() {
+        Ok(Some(path)) => {
+            println!("Installed Cursor hooks in {}", path.display());
+            println!("Cursor reloads hooks.json on save; restart Cursor if they don't load.");
+        }
+        Ok(None) => {
+            println!(
+                "Cursor not found (~/.cursor missing) — install it first, then re-run `roost setup`."
+            );
+        }
+        Err(e) => eprintln!("Warning: Cursor setup failed: {e}"),
     }
     Ok(())
 }

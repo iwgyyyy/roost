@@ -76,6 +76,7 @@ pub fn print_sessions(views: &[SessionView]) {
             crate::protocol::AgentFamily::Claude => "✻",
             crate::protocol::AgentFamily::Codex => "⬡",
             crate::protocol::AgentFamily::Deepseek => "≈",
+            crate::protocol::AgentFamily::Cursor => "❯",
             crate::protocol::AgentFamily::Unknown => "◆",
         };
 

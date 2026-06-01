@@ -297,9 +297,14 @@ impl AgentSession {
             // so it reuses the Claude state machine verbatim. Caveat: CodeWhale
             // has no turn-completion hook, so a DeepSeek session stays Working
             // until the next prompt or `session_end` — there is no Done state.
-            AgentFamily::Claude | AgentFamily::Deepseek | AgentFamily::Unknown => {
-                self.apply_claude(ev)
-            }
+            // Cursor fires the same lifecycle events (sessionStart / beforeSubmitPrompt
+            // → UserPromptSubmit / preToolUse / postToolUse / stop → Stop=Done /
+            // sessionEnd), mapped to roost EventKinds in setup, so it also reuses the
+            // Claude state machine. Unlike CodeWhale, Cursor HAS a stop event → Done.
+            AgentFamily::Claude
+            | AgentFamily::Deepseek
+            | AgentFamily::Cursor
+            | AgentFamily::Unknown => self.apply_claude(ev),
         };
 
         // Update busy timer based on the transition:

@@ -46,6 +46,7 @@ pub enum AgentFamily {
     Claude,
     Codex,
     Deepseek,
+    Cursor,
     Unknown,
 }
 
@@ -59,6 +60,7 @@ impl AgentFamily {
             AgentFamily::Claude => "✻",
             AgentFamily::Codex => "⬡",
             AgentFamily::Deepseek => "≈",
+            AgentFamily::Cursor => "❯",
             AgentFamily::Unknown => "◆",
         }
     }
@@ -69,6 +71,7 @@ impl AgentFamily {
             AgentFamily::Claude => "Claude Code",
             AgentFamily::Codex => "Codex",
             AgentFamily::Deepseek => "DeepSeek",
+            AgentFamily::Cursor => "Cursor",
             AgentFamily::Unknown => "Unknown",
         }
     }
@@ -79,6 +82,7 @@ impl AgentFamily {
             AgentFamily::Claude => "Claude",
             AgentFamily::Codex => "Codex",
             AgentFamily::Deepseek => "DeepSeek",
+            AgentFamily::Cursor => "Cursor",
             AgentFamily::Unknown => "agent",
         }
     }

@@ -199,6 +199,13 @@ pub fn hooks_installed() -> bool {
         }
     }
 
+    let cursor = home.join(".cursor").join("hooks.json");
+    if let Ok(Some(v)) = read_settings(&cursor)
+        && config_has_roost_hook(&v, is_cursor_roost_entry)
+    {
+        return true;
+    }
+
     false
 }
 
@@ -792,6 +799,136 @@ pub fn uninstall_deepseek_from(config_dir: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(config_dir.to_path_buf()))
 }
 
+// ---------------------------------------------------------------------------
+// Cursor setup
+// ---------------------------------------------------------------------------
+
+/// Cursor hook events roost registers, paired with the roost EventKind name in
+/// the command. Cursor uses camelCase lifecycle events; the command argument
+/// uses roost's canonical EventKind names so `hook::parse_event_kind` parses
+/// them unchanged. Cursor has a `stop` event → Done.
+const CURSOR_EVENTS: &[(&str, &str)] = &[
+    ("sessionStart", "SessionStart"),
+    ("beforeSubmitPrompt", "UserPromptSubmit"),
+    ("preToolUse", "PreToolUse"),
+    ("postToolUse", "PostToolUse"),
+    ("stop", "Stop"),
+    ("sessionEnd", "SessionEnd"),
+];
+
+/// A roost hook entry in Cursor's hooks.json: `{"command":"…","timeout":5}`.
+/// No `failClosed` (fail-open: a roost hook failure never blocks Cursor) and no
+/// matcher (roost observes every event).
+fn make_cursor_roost_entry(command: &str) -> Value {
+    serde_json::json!({ "command": command, "timeout": 5 })
+}
+
+fn is_cursor_roost_entry(entry: &Value) -> bool {
+    entry
+        .get("command")
+        .and_then(|c| c.as_str())
+        .map(|c| c.contains(ROOST_MARKER))
+        .unwrap_or(false)
+}
+
+/// Merge roost hooks into a Cursor `hooks.json` value (schema version 1).
+/// Idempotent; preserves the user's own hooks in each event array.
+pub fn merge_cursor_hooks_json(existing: Option<Value>, roost_bin: &str) -> Value {
+    let mut root = match existing {
+        Some(Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    root.insert("version".to_string(), Value::from(1));
+
+    let hooks_obj = root
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let hooks_map = if let Value::Object(map) = hooks_obj {
+        map
+    } else {
+        *hooks_obj = Value::Object(serde_json::Map::new());
+        if let Value::Object(map) = hooks_obj {
+            map
+        } else {
+            unreachable!()
+        }
+    };
+
+    for (cursor_event, roost_event) in CURSOR_EVENTS {
+        let command = format!("{roost_bin} hook cursor {roost_event}");
+        let arr = hooks_map
+            .entry(*cursor_event)
+            .or_insert_with(|| Value::Array(vec![]));
+        if let Value::Array(a) = arr {
+            let exists = a
+                .iter()
+                .any(|e| e.get("command").and_then(|c| c.as_str()) == Some(command.as_str()));
+            if !exists {
+                a.push(make_cursor_roost_entry(&command));
+            }
+        }
+    }
+
+    Value::Object(root)
+}
+
+/// Remove roost-managed entries from a Cursor hooks.json. Preserves user hooks.
+pub fn remove_cursor_hooks_json(existing: Value) -> Value {
+    let mut root = match existing {
+        Value::Object(map) => map,
+        other => return other,
+    };
+    if let Some(Value::Object(hooks_map)) = root.get_mut("hooks") {
+        for (cursor_event, _) in CURSOR_EVENTS {
+            if let Some(Value::Array(a)) = hooks_map.get_mut(*cursor_event) {
+                a.retain(|e| !is_cursor_roost_entry(e));
+            }
+        }
+    }
+    Value::Object(root)
+}
+
+/// Install Cursor hooks using the real HOME. Ok(None) if `~/.cursor` is absent.
+pub fn install_cursor() -> Result<Option<PathBuf>> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .context("HOME not set")?;
+    install_cursor_into(Path::new(&home), &current_exe_path())
+}
+
+/// Install Cursor hooks into `<home>/.cursor/hooks.json`. Ok(None) if absent.
+pub fn install_cursor_into(home_dir: &Path, roost_bin: &str) -> Result<Option<PathBuf>> {
+    let cursor_dir = home_dir.join(".cursor");
+    if !cursor_dir.exists() {
+        return Ok(None);
+    }
+    let path = cursor_dir.join("hooks.json");
+    let existing = read_settings(&path)?;
+    let merged = merge_cursor_hooks_json(existing, roost_bin);
+    write_json_atomic(&path, &merged)?;
+    Ok(Some(path))
+}
+
+/// Uninstall Cursor hooks using the real HOME.
+pub fn uninstall_cursor() -> Result<Option<PathBuf>> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .context("HOME not set")?;
+    uninstall_cursor_from(Path::new(&home))
+}
+
+/// Uninstall Cursor hooks from `<home>/.cursor/hooks.json`.
+pub fn uninstall_cursor_from(home_dir: &Path) -> Result<Option<PathBuf>> {
+    let path = home_dir.join(".cursor").join("hooks.json");
+    let existing = read_settings(&path)?;
+    let cleaned = match existing {
+        Some(v) => remove_cursor_hooks_json(v),
+        None => return Ok(None),
+    };
+    write_json_atomic(&path, &cleaned)?;
+    Ok(Some(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1344,6 +1481,97 @@ command = \"echo my-own-hook\"
         let installed = merge_deepseek_hooks_toml("", "/usr/bin/roost").unwrap();
         assert!(deepseek_config_has_roost_hook(&installed));
         assert!(!deepseek_config_has_roost_hook("provider = \"deepseek\"\n"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Cursor hooks.json tests
+    // ---------------------------------------------------------------------------
+
+    fn cursor_event_arr<'a>(result: &'a Value, event: &str) -> &'a Vec<Value> {
+        result
+            .get("hooks")
+            .and_then(|h| h.get(event))
+            .and_then(|v| v.as_array())
+            .unwrap_or_else(|| panic!("cursor event {event} missing"))
+    }
+
+    #[test]
+    fn merge_cursor_from_none_registers_all_events_v1() {
+        let r = merge_cursor_hooks_json(None, "/usr/bin/roost");
+        assert_eq!(r.get("version").and_then(|v| v.as_u64()), Some(1));
+        for (cursor_event, roost_event) in CURSOR_EVENTS {
+            let arr = cursor_event_arr(&r, cursor_event);
+            let cmd = arr[0].get("command").and_then(|c| c.as_str()).unwrap();
+            assert_eq!(cmd, format!("/usr/bin/roost hook cursor {roost_event}"));
+        }
+        // stop must be registered (→ Done).
+        assert!(r.get("hooks").and_then(|h| h.get("stop")).is_some());
+    }
+
+    #[test]
+    fn merge_cursor_is_idempotent() {
+        let r1 = merge_cursor_hooks_json(None, "/usr/bin/roost");
+        let r2 = merge_cursor_hooks_json(Some(r1.clone()), "/usr/bin/roost");
+        for (cursor_event, _) in CURSOR_EVENTS {
+            assert_eq!(
+                cursor_event_arr(&r2, cursor_event).len(),
+                1,
+                "cursor event {cursor_event} duplicated on second merge"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_cursor_preserves_user_hooks() {
+        let existing = json!({
+            "version": 1,
+            "hooks": { "afterFileEdit": [{ "command": ".cursor/hooks/format.sh" }] }
+        });
+        let r = merge_cursor_hooks_json(Some(existing), "/usr/bin/roost");
+        // User's afterFileEdit hook preserved.
+        let edit = cursor_event_arr(&r, "afterFileEdit");
+        assert_eq!(
+            edit[0].get("command").and_then(|c| c.as_str()),
+            Some(".cursor/hooks/format.sh")
+        );
+        // roost events added.
+        assert!(config_has_roost_hook(&r, is_cursor_roost_entry));
+    }
+
+    #[test]
+    fn remove_cursor_strips_roost_keeps_user() {
+        let existing = json!({
+            "version": 1,
+            "hooks": { "stop": [{ "command": "my-own-stop-hook" }] }
+        });
+        let installed = merge_cursor_hooks_json(Some(existing), "/usr/bin/roost");
+        let cleaned = remove_cursor_hooks_json(installed);
+        let stop = cursor_event_arr(&cleaned, "stop");
+        assert_eq!(stop.len(), 1, "only the user's stop hook remains");
+        assert_eq!(
+            stop[0].get("command").and_then(|c| c.as_str()),
+            Some("my-own-stop-hook")
+        );
+        assert!(!config_has_roost_hook(&cleaned, is_cursor_roost_entry));
+    }
+
+    #[test]
+    fn cursor_event_names_parse_correctly() {
+        use crate::hook::parse_event_kind;
+        for (_cursor, roost_event) in CURSOR_EVENTS {
+            assert!(
+                parse_event_kind(roost_event).is_ok(),
+                "Cursor event '{roost_event}' written by setup must parse"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_roost_entry_has_no_fail_closed() {
+        // A roost hook must never block Cursor: no failClosed (fail-open default).
+        let entry = make_cursor_roost_entry("/usr/bin/roost hook cursor Stop");
+        assert!(entry.get("failClosed").is_none());
+        assert_eq!(entry.get("timeout").and_then(|t| t.as_u64()), Some(5));
     }
 
     #[test]
