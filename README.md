@@ -4,16 +4,20 @@
 
 Watch all your AI coding agents from one terminal panel.
 
-`roost` is a passive, read-only observer: run it in any terminal and it shows every **Claude Code** and **Codex** session running on your machine — grouped by whether they need your attention — in real time.
+`roost` is a passive, read-only observer: run it in any terminal and it shows every AI coding agent session running on your machine — **Claude Code**, **Codex**, **DeepSeek (CodeWhale)**, and **Cursor** — grouped by whether they need your attention, in real time.
 
 ```
-┌─ roost ──────────────────────────────────────────────────────────── 2 agents · live ● ─┐
+┌─ roost ──────────────────────────────────────────────────── 4 agents · live ● ─┐
 
   NEEDS INPUT  1
- ▌⬡ Codex  payments-api   ? Which migration strategy? (1/2)              Codex      8s
+ ▌⬡ Codex     payments-api   ? Which migration strategy? (1/2)     Codex     8s
 
-  WORKING  1
-  ✻ Claude  roost          ⠸ working    Editing src/session.rs   Zed              1m
+  WORKING  2
+  ✻ Claude    roost          ⠸ working   Editing src/session.rs    Zed       1m
+  ❯ Cursor    web-frontend   ⠸ working   Editing app/page.tsx      Cursor    12s
+
+  IDLE  1
+  ≈ DeepSeek  api-server     ✓ done                                Warp      3m
 
   ↑/↓ j/k select · enter peek · o jump · q quit
 ```
@@ -24,7 +28,7 @@ roost does **not** start, proxy, or control agents. It works entirely through th
 
 ## Features
 
-- **One panel for every agent** — all running Claude Code and Codex sessions on the machine, live.
+- **One panel for every agent** — all running Claude Code, Codex, DeepSeek (CodeWhale), and Cursor sessions on the machine, live.
 - **Attention-first grouping** — sessions sorted into `NEEDS INPUT` → `WORKING` → `IDLE`, so the ones waiting on you float to the top.
 - **Rich per-session state** — Approval, Question, Working, Done, Idle — each with its own glyph and colour.
 - **Clarify question cards** — when an agent asks an interactive question (Claude `AskUserQuestion`, Codex `request_user_input`), roost shows the actual question text and a `(1/N)` indicator for multi-question cards, instead of a generic "needs permission".
@@ -66,7 +70,7 @@ roost setup
 # 2. Start the TUI panel (auto-starts the background daemon)
 roost
 
-# 3. Start a Claude Code or Codex session in another terminal — it appears immediately
+# 3. Start any supported agent (Claude Code, Codex, CodeWhale, Cursor) — it appears immediately
 ```
 
 On first run, if hooks aren't installed yet, `roost` offers to run `roost setup`
@@ -111,40 +115,18 @@ agent fires hook
 
 ---
 
-## Agent support
+## Supported agents
 
-### Claude Code
+`roost setup` installs hooks for each agent it finds on your machine; agents it doesn't find are skipped.
 
-Hooks registered in `~/.claude/settings.json`:
+| Agent | What it is | Config |
+|---|---|---|
+| **Claude Code** | Anthropic's `claude` CLI / IDE sessions | `~/.claude/settings.json` |
+| **Codex** | OpenAI's `codex` CLI | `~/.codex/` |
+| **DeepSeek (CodeWhale)** | the `codewhale` / `deepseek` terminal agent | `~/.codewhale/` (or `~/.deepseek/`) |
+| **Cursor** | Cursor's built-in Agent | `~/.cursor/hooks.json` |
 
-| Hook event | What roost uses it for |
-|---|---|
-| `SessionStart` | Session appears in the list (Idle) |
-| `UserPromptSubmit` | State → Working; captures the first prompt |
-| `PreToolUse` | Activity text (`Editing …` / `Running …`); detects the `AskUserQuestion` clarify card → Question |
-| `PostToolUse` | Activity resets to `thinking…`; counts edits |
-| `Notification` | Approval vs Question vs idle, from the notification text |
-| `Stop` | State → Done |
-| `SessionEnd` | Session removed immediately |
-
-### Codex
-
-Hooks registered in `~/.codex/hooks.json`; feature flag set in `~/.codex/config.toml` (`[features] hooks = true`).
-
-| Hook event | What roost uses it for |
-|---|---|
-| `SessionStart` | Session appears in the list (Idle) |
-| `UserPromptSubmit` | State → Working |
-| `PreToolUse` | Detects the `request_user_input` clarify card → Question (matcher-scoped to that tool only, so ordinary tool calls fire no extra hook) |
-| `PostToolUse` | Activity text (e.g. `Bash done`) |
-| `PermissionRequest` | State → Approval |
-| `Stop` | State → Done |
-
-**Codex notes:**
-
-- No `SessionEnd` hook — session removal relies on PID liveness probing (every ~2 s) plus an idle timeout.
-- Codex hooks are behind an experimental feature flag and may change.
-- A clarify card pauses the turn without firing a `Stop`, so the Question state persists until the user answers.
+Each shows up with its own glyph and colour. New agents are added over time — see the issues for what's planned.
 
 ---
 

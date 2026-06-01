@@ -4,16 +4,20 @@
 
 在一个终端面板里盯住你所有的 AI 编码 agent。
 
-`roost` 是一个被动、只读的观察器：在任意终端里运行它，就能实时看到机器上所有正在运行的 **Claude Code** 和 **Codex** 会话，并按「是否需要你介入」分组排列。
+`roost` 是一个被动、只读的观察器：在任意终端里运行它，就能实时看到机器上所有正在运行的 AI 编码 agent 会话——**Claude Code**、**Codex**、**DeepSeek（CodeWhale）**、**Cursor**——并按「是否需要你介入」分组排列。
 
 ```
-┌─ roost ──────────────────────────────────────────────────────────── 2 agents · live ● ─┐
+┌─ roost ──────────────────────────────────────────────────── 4 agents · live ● ─┐
 
   NEEDS INPUT  1
- ▌⬡ Codex  payments-api   ? 用哪种迁移策略？ (1/2)                       Codex      8s
+ ▌⬡ Codex     payments-api   ? 用哪种迁移策略？ (1/2)            Codex     8s
 
-  WORKING  1
-  ✻ Claude  roost          ⠸ working    Editing src/session.rs   Zed              1m
+  WORKING  2
+  ✻ Claude    roost          ⠸ working   Editing src/session.rs   Zed       1m
+  ❯ Cursor    web-frontend   ⠸ working   Editing app/page.tsx     Cursor    12s
+
+  IDLE  1
+  ≈ DeepSeek  api-server     ✓ done                               Warp      3m
 
   ↑/↓ j/k select · enter peek · o jump · q quit
 ```
@@ -24,7 +28,7 @@ roost **不会**启动、代理或控制任何 agent。它完全依靠各 agent 
 
 ## 功能
 
-- **一个面板看全部 agent**——机器上所有运行中的 Claude Code 和 Codex 会话，实时更新。
+- **一个面板看全部 agent**——机器上所有运行中的 Claude Code、Codex、DeepSeek（CodeWhale）、Cursor 会话，实时更新。
 - **以「需要关注」优先分组**——会话按 `NEEDS INPUT` → `WORKING` → `IDLE` 排序，等你处理的浮在最上面。
 - **细粒度会话状态**——Approval（待授权）、Question（待回答）、Working（工作中）、Done（已完成）、Idle（空闲），各有独立字形与颜色。
 - **clarify 询问卡片**——当 agent 弹出交互式问题（Claude 的 `AskUserQuestion`、Codex 的 `request_user_input`）时，roost 直接显示**实际的问题文本**，多问题卡片还带 `(1/N)` 计数，而不是笼统的「needs permission」。
@@ -65,7 +69,7 @@ roost setup
 # 2. 启动 TUI 面板（自动拉起后台 daemon）
 roost
 
-# 3. 在另一个终端启动 Claude Code 或 Codex 会话——它会立刻出现
+# 3. 启动任意支持的 agent（Claude Code、Codex、CodeWhale、Cursor）——它会立刻出现
 ```
 
 首次运行时，如果还没装 hook，`roost` 会询问是否帮你跑 `roost setup`——所以也可以直接 `roost` 然后确认提示。
@@ -109,40 +113,18 @@ agent 触发 hook
 
 ---
 
-## Agent 支持
+## 支持的 agent
 
-### Claude Code
+`roost setup` 会为机器上检测到的每个 agent 安装 hook；没装的会自动跳过。
 
-注册在 `~/.claude/settings.json` 的 hook：
+| Agent | 是什么 | 配置位置 |
+|---|---|---|
+| **Claude Code** | Anthropic 的 `claude` CLI / 编辑器内会话 | `~/.claude/settings.json` |
+| **Codex** | OpenAI 的 `codex` CLI | `~/.codex/` |
+| **DeepSeek（CodeWhale）** | `codewhale` / `deepseek` 终端 agent | `~/.codewhale/`（或 `~/.deepseek/`） |
+| **Cursor** | Cursor 自带 Agent | `~/.cursor/hooks.json` |
 
-| Hook 事件 | roost 用途 |
-|---|---|
-| `SessionStart` | 会话出现在列表中（Idle） |
-| `UserPromptSubmit` | 状态 → Working；记录首条 prompt |
-| `PreToolUse` | 活动文本（`Editing …` / `Running …`）；识别 `AskUserQuestion` clarify 卡片 → Question |
-| `PostToolUse` | 活动重置为 `thinking…`；统计编辑次数 |
-| `Notification` | 根据通知文本判定 Approval / Question / 空闲 |
-| `Stop` | 状态 → Done |
-| `SessionEnd` | 立即移除会话 |
-
-### Codex
-
-注册在 `~/.codex/hooks.json` 的 hook；在 `~/.codex/config.toml` 设置特性开关（`[features] hooks = true`）。
-
-| Hook 事件 | roost 用途 |
-|---|---|
-| `SessionStart` | 会话出现在列表中（Idle） |
-| `UserPromptSubmit` | 状态 → Working |
-| `PreToolUse` | 识别 `request_user_input` clarify 卡片 → Question（matcher 只匹配该工具，普通工具调用不会多触发 hook） |
-| `PostToolUse` | 活动文本（如 `Bash done`） |
-| `PermissionRequest` | 状态 → Approval |
-| `Stop` | 状态 → Done |
-
-**Codex 说明：**
-
-- 没有 `SessionEnd` hook——会话移除依赖 PID 存活探测（约每 2 秒）加空闲超时。
-- Codex 的 hook 处于实验性特性开关之后，可能变化。
-- clarify 卡片会让 turn 暂停但**不发 `Stop`**，所以 Question 状态会一直保持到用户作答。
+每个 agent 在面板里有自己的字形和颜色。后续会陆续接入更多 agent——计划中的可看 issues。
 
 ---
 
