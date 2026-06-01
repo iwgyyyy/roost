@@ -38,9 +38,13 @@ pub fn summarize_event(ev: &HookEvent) -> String {
         }
         EventKind::Notification | EventKind::PermissionRequest => {
             let text = ev.notification.as_deref().unwrap_or("approval requested");
-            // Show first meaningful chunk (truncate long notifications)
-            let short = truncate_str(text, 60);
-            format!("▲ asked to run {short}")
+            if is_idle_notification(text) {
+                "○ waiting for input".to_string()
+            } else {
+                // Show first meaningful chunk (truncate long notifications)
+                let short = truncate_str(text, 60);
+                format!("▲ asked to run {short}")
+            }
         }
         EventKind::Stop => "✓ done".to_string(),
         EventKind::UserPromptSubmit => {
@@ -280,12 +284,19 @@ impl AgentSession {
             }
             EventKind::Notification => {
                 let text = ev.notification.as_deref().unwrap_or("");
-                if is_approval_notification(text) {
+                if is_idle_notification(text) {
+                    // "Claude is waiting for your input" — the turn is over and the
+                    // agent is just idling until the next prompt. Not an actionable
+                    // question; treat as idle, not NEEDS INPUT.
+                    self.state = AgentState::Idle;
+                    self.activity = None;
+                } else if is_approval_notification(text) {
                     self.state = AgentState::Approval;
+                    self.activity = Some(text.to_string());
                 } else {
                     self.state = AgentState::Question;
+                    self.activity = Some(text.to_string());
                 }
-                self.activity = Some(text.to_string());
                 false
             }
             EventKind::Stop => {
@@ -427,6 +438,16 @@ pub fn is_approval_notification(text: &str) -> bool {
         || lower.contains("run:")
         || lower.contains("execute")
         || lower.contains("grant")
+}
+
+/// True when the notification is the generic "idle, waiting for the next prompt"
+/// nudge (fired after a turn ends and the user is slow to respond). This is NOT
+/// an actionable question — the agent is effectively idle.
+pub fn is_idle_notification(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("waiting for your input")
+        || lower.contains("waiting for input")
+        || lower.contains("is waiting")
 }
 
 #[cfg(test)]
@@ -762,6 +783,15 @@ mod tests {
         assert!(is_approval_notification("Execute this script?"));
         assert!(!is_approval_notification("Choose: Postgres or MySQL?"));
         assert!(!is_approval_notification("What branch should I use?"));
+    }
+
+    #[test]
+    fn idle_notification_detection() {
+        // The generic "waiting for input" nudge must be treated as idle, not a question.
+        assert!(is_idle_notification("Claude is waiting for your input"));
+        assert!(is_idle_notification("waiting for input"));
+        assert!(!is_idle_notification("Permission required to run git push"));
+        assert!(!is_idle_notification("Choose: Postgres or MySQL?"));
     }
 
     // ── summarize_event tests (TDD, Task 1) ──────────────────────────────────
