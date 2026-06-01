@@ -3,7 +3,26 @@
 //! macOS: `open`, `osascript`, `open -b <bundle>`, URL scheme.
 //! Linux: `wmctrl`/`xdotool` (best-effort), `xdg-open`.
 
+use std::process::Stdio;
+
 use super::Executor;
+
+/// Spawn a fire-and-forget command with stdin/stdout/stderr all detached from
+/// the parent terminal, returning whether it exited successfully.
+///
+/// This matters because `roost` runs inside an alternate-screen TUI: any output
+/// a launched helper writes (e.g. macOS LaunchServices warnings like
+/// `LSCopyApplicationURLsForBundleIdentifier() failed …`) would otherwise land
+/// directly on the screen and corrupt the layout.
+#[allow(dead_code)]
+fn status_detached(mut cmd: std::process::Command) -> bool {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
 // ── RealExecutor ──────────────────────────────────────────────────────────────
 
@@ -26,19 +45,15 @@ impl Executor for RealExecutor {
     fn open_url(&self, url: &str) -> bool {
         #[cfg(target_os = "macos")]
         {
-            std::process::Command::new("open")
-                .arg(url)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+            let mut cmd = std::process::Command::new("open");
+            cmd.arg(url);
+            status_detached(cmd)
         }
         #[cfg(target_os = "linux")]
         {
-            std::process::Command::new("xdg-open")
-                .arg(url)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+            let mut cmd = std::process::Command::new("xdg-open");
+            cmd.arg(url);
+            status_detached(cmd)
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
@@ -50,11 +65,9 @@ impl Executor for RealExecutor {
     fn activate_app(&self, bundle_id: &str) -> bool {
         #[cfg(target_os = "macos")]
         {
-            std::process::Command::new("open")
-                .args(["-b", bundle_id])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+            let mut cmd = std::process::Command::new("open");
+            cmd.args(["-b", bundle_id]);
+            status_detached(cmd)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -90,19 +103,15 @@ impl Executor for RealExecutor {
     fn open_dir(&self, path: &str) -> bool {
         #[cfg(target_os = "macos")]
         {
-            std::process::Command::new("open")
-                .arg(path)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+            let mut cmd = std::process::Command::new("open");
+            cmd.arg(path);
+            status_detached(cmd)
         }
         #[cfg(target_os = "linux")]
         {
-            std::process::Command::new("xdg-open")
-                .arg(path)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+            let mut cmd = std::process::Command::new("xdg-open");
+            cmd.arg(path);
+            status_detached(cmd)
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {

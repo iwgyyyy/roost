@@ -52,52 +52,12 @@ where
     Some(direct_parent)
 }
 
-/// Append a diagnostic JSON line to ~/.roost/hook-debug.jsonl.
-/// Silently ignores all errors — must never block or fail the hook.
-fn append_debug_log(family: &str, event_name: &str, raw_stdin: &str, event: &HookEvent) {
-    let write = || -> std::io::Result<()> {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| "/tmp".to_string());
-        let dir = std::path::Path::new(&home).join(".roost");
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("hook-debug.jsonl");
-
-        let entry = serde_json::json!({
-            "ts": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-            "family": family,
-            "event": event_name,
-            "session_id": &event.session_id,
-            "cwd": &event.cwd,
-            "raw_stdin": raw_stdin,
-        });
-        let mut line = serde_json::to_string(&entry).unwrap_or_default();
-        line.push('\n');
-
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
-        f.write_all(line.as_bytes())?;
-        Ok(())
-    };
-    let _ = write();
-}
-
 /// Run the hook subcommand: read stdin JSON, build HookEvent, send to daemon.
 /// family: "claude" | "codex"
 /// event_name: e.g. "SessionStart", "PreToolUse", etc.
 pub fn run_hook(family: &str, event_name: &str) -> Result<()> {
     let stdin_data = read_stdin()?;
     let event = build_hook_event(family, event_name, &stdin_data)?;
-
-    // Append raw payload diagnostic log (always-on for now; used to capture
-    // real Codex field names from the live payload).
-    append_debug_log(family, event_name, &stdin_data, &event);
 
     let path = sock::socket_path();
 

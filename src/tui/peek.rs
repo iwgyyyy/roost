@@ -222,9 +222,11 @@ pub fn render_peek(buf: &mut Buffer, area: Rect, detail: &SessionDetail, theme: 
     }
 
     // ── Recent events timeline (reverse-chron, newest first) ──
-    // Completed steps show their static duration (how long the step took).
-    // The most-recent event (index 0, still in progress) has no duration and
-    // shows no time prefix — the "since" field above already tracks it live.
+    // Completed steps show their FROZEN duration (how long the step ran). The
+    // most-recent event (index 0) has no successor yet, so its duration is not
+    // determined — it shows no time prefix (blank, kept aligned) rather than a
+    // live counter that would tick every second. The "since" field above
+    // already tracks the current step's time live.
     for ev in &detail.recent_events {
         if row >= footer_y {
             break;
@@ -235,9 +237,8 @@ pub fn render_peek(buf: &mut Buffer, area: Rect, detail: &SessionDetail, theme: 
             let dur_str = anim::relative_time(dur);
             format!("{dur_str:>6}  {summary}")
         } else {
-            // Most-recent / in-progress step: LIVE timer (counts up).
-            let live = anim::relative_time(ev.ts_secs);
-            format!("{live:>6}  {summary}")
+            // Newest step: duration not yet known — no time prefix (blank pad).
+            format!("{:>6}  {summary}", "")
         };
         render_body_row(buf, row, &content, Style::default().fg(Color::DarkGray));
         row += 1;

@@ -70,15 +70,16 @@ impl DaemonState {
             .map(|(i, se)| {
                 let ts_secs = ts_vals[i];
                 // Each completed step's timer FREEZES at how long that step ran =
-                // the gap from this event until the NEXT (newer) event arrived =
-                // ts_vals[i] - ts_vals[i-1] (older age minus newer age).
-                // Index 0 is the most-recent / in-progress step → None, which the
-                // peek renders as a LIVE timer (counts up). All older steps get a
-                // frozen duration and never disappear.
+                // the gap from this event until the NEXT (newer) event arrived.
+                // Computed from the raw Instants of the two events (newer minus
+                // older) so the value is independent of `now` and never jitters
+                // by ±1s as the clock advances (two separately-floored ages would
+                // flicker between adjacent integers). Index 0 is the newest event
+                // and has no successor yet, so its duration is unknown → None.
                 let duration_secs = if i == 0 {
                     None
                 } else {
-                    Some(ts_vals[i].saturating_sub(ts_vals[i - 1]))
+                    Some(stored[i - 1].ts.duration_since(se.ts).as_secs())
                 };
                 Event {
                     ts_secs,
@@ -422,5 +423,83 @@ mod tests {
         // approval should come first
         assert_eq!(views[0].state, "approval");
         assert_eq!(views[1].state, "working");
+    }
+
+    /// Regression: completed-step durations in the peek "recent" list must be
+    /// FROZEN — identical no matter what `now` we render at. The previous
+    /// implementation subtracted two separately-floored ages, which flickered by
+    /// ±1s as the clock advanced (the "乱跳" the user observed).
+    #[test]
+    fn recent_event_durations_are_stable_across_now() {
+        use crate::protocol::{AgentFamily, EventKind, HookEvent};
+        use crate::session::StoredEvent;
+        use std::time::Duration;
+
+        let start_ev = HookEvent {
+            kind: EventKind::SessionStart,
+            family: AgentFamily::Claude,
+            session_id: "s1".to_string(),
+            cwd: "/tmp".to_string(),
+            pid: None,
+            tool_name: None,
+            tool_input: None,
+            prompt: None,
+            notification: None,
+            host_app: None,
+            terminal_session_id: None,
+            terminal_tty: None,
+            tmux_target: None,
+            wezterm_pane: None,
+            zellij_session: None,
+            workspace_path: None,
+            codex_thread_id: None,
+            pane_title: None,
+        };
+
+        let mut state = DaemonState::new();
+        let mut s = AgentSession::new(&start_ev);
+
+        // Craft three events with fractional-second gaps that would make two
+        // independently-floored ages flip between adjacent integers.
+        let base = Instant::now();
+        s.last_activity = base - Duration::from_millis(700);
+        s.events.clear();
+        // chron order (oldest → newest): front = oldest, back = newest.
+        for ms_ago in [11_400u64, 4_700, 700] {
+            s.events.push_back(StoredEvent {
+                kind: EventKind::PostToolUse,
+                ts: base - Duration::from_millis(ms_ago),
+                summary: format!("step {ms_ago}"),
+            });
+        }
+        state.sessions.insert("s1".to_string(), s);
+
+        // Render at several `now` offsets; completed durations must not change.
+        let durations_at = |delta_ms: u64| -> Vec<Option<u64>> {
+            let now = base + Duration::from_millis(delta_ms);
+            state
+                .session_detail("s1", now)
+                .unwrap()
+                .recent_events
+                .iter()
+                .map(|e| e.duration_secs)
+                .collect()
+        };
+
+        let d0 = durations_at(0);
+        for delta in [200u64, 500, 600, 900, 1_300, 1_800] {
+            assert_eq!(
+                durations_at(delta),
+                d0,
+                "completed-step durations must be frozen, but changed at +{delta}ms"
+            );
+        }
+        // Newest event (index 0) has no successor → unknown duration.
+        assert_eq!(d0[0], None, "newest event should have no frozen duration");
+        // Older events should carry a concrete frozen duration.
+        assert!(
+            d0[1].is_some() && d0[2].is_some(),
+            "older events should have frozen durations, got {d0:?}"
+        );
     }
 }

@@ -319,14 +319,7 @@ pub fn render_header(
 /// Render the bottom border line.
 ///
 /// `peek_open`: when true, shows `esc close` hint; otherwise shows `enter open`.
-/// `jump_status`: optional one-line message from the last jump attempt.
-pub fn render_footer_border(
-    buf: &mut Buffer,
-    area: Rect,
-    theme: &Theme,
-    peek_open: bool,
-    jump_status: Option<&str>,
-) {
+pub fn render_footer_border(buf: &mut Buffer, area: Rect, theme: &Theme, peek_open: bool) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -334,12 +327,7 @@ pub fn render_footer_border(
     let x = area.x;
     let w = area.width as usize;
 
-    // If we have a jump status message, show it; otherwise show key hints.
-    let keys: String = if let Some(msg) = jump_status {
-        // Show jump result for a moment; truncate to available width
-        let avail = w.saturating_sub(8); // rough margin for borders
-        layout::truncate_to_width(msg, avail)
-    } else if peek_open {
+    let keys: String = if peek_open {
         "↑/↓ j/k select · esc close · q quit".to_string()
     } else {
         "↑/↓ j/k select · enter peek · o jump · q quit".to_string()
@@ -362,6 +350,34 @@ pub fn render_footer_border(
         keys.as_str(),
         Style::default().fg(theme.dim),
     );
+}
+
+// ── Status line ────────────────────────────────────────────────────────────────
+
+/// Render a transient status message (e.g. jump result) on a single line.
+///
+/// Rendered as an overlay on the row directly above the footer border so it
+/// doesn't consume a body row or shift the scroll position. The line is cleared
+/// first so it never mixes with whatever row was underneath it.
+pub fn render_status_line(buf: &mut Buffer, area: Rect, theme: &Theme, msg: &str) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let y = area.y;
+    let w = area.width as usize;
+
+    // Clear the line first (overlay — there may be an agent row underneath).
+    let blank = " ".repeat(w);
+    buf.set_string(area.x, y, &blank, Style::default());
+
+    // Align the text with the footer hint indent ("╰── " == 4 cols) for a tidy look.
+    let indent = 4u16;
+    let text_x = area.x + indent;
+    let avail = w.saturating_sub(indent as usize + 1);
+    let text = layout::truncate_to_width(msg, avail);
+    // Default terminal fg so it stays readable on both light and dark terminals.
+    buf.set_string(text_x, y, &text, Style::default().fg(Color::Reset));
+    let _ = theme;
 }
 
 // ── Empty state ───────────────────────────────────────────────────────────────
@@ -474,13 +490,7 @@ pub fn render_frame(buf: &mut Buffer, area: Rect, state: &RenderState<'_>) {
         width: area.width,
         height: 1,
     };
-    render_footer_border(
-        buf,
-        footer_area,
-        state.theme,
-        state.peek_open,
-        state.jump_status,
-    );
+    render_footer_border(buf, footer_area, state.theme, state.peek_open);
 
     // Body area (between header and footer)
     let body_y = area.y + 1;
@@ -497,7 +507,6 @@ pub fn render_frame(buf: &mut Buffer, area: Rect, state: &RenderState<'_>) {
 
     if state.groups.is_empty() {
         render_empty_state(buf, body_area, state.theme);
-        return;
     }
 
     // Render groups
@@ -575,6 +584,23 @@ pub fn render_frame(buf: &mut Buffer, area: Rect, state: &RenderState<'_>) {
             );
             current_y += 1;
             flat_idx += 1;
+        }
+    }
+
+    // ── Status line (transient toast above the footer) ─────────────────────
+    // Drawn last so it overlays the bottom body row rather than reserving a row
+    // (keeps the agent list's scroll position stable). Only the row directly
+    // above the footer border is used; the header row is never touched.
+    if let Some(msg) = state.jump_status {
+        let status_y = footer_y.saturating_sub(1);
+        if status_y > area.y {
+            let status_area = Rect {
+                x: area.x,
+                y: status_y,
+                width: area.width,
+                height: 1,
+            };
+            render_status_line(buf, status_area, state.theme, msg);
         }
     }
 }
@@ -1210,6 +1236,57 @@ mod tests {
         assert!(
             !content.contains("NEEDS INPUT"),
             "NEEDS INPUT group header should not appear when all its rows are scrolled away\ncontent: {content:?}"
+        );
+    }
+
+    #[test]
+    fn jump_status_renders_above_footer_not_in_border() {
+        // The status message must appear on the row directly above the footer,
+        // and the footer border row must still show the key hints (not the message).
+        let sessions = vec![make_session("s1", "idle", None)];
+        let groups = viewmodel::group_and_sort(&sessions);
+        let width = 80u16;
+        let height = 12u16;
+        let mut term = make_terminal(width, height);
+        let anim = Anim::new();
+        let theme = Theme::classic();
+        let selection = Selection { index: Some(0) };
+        let msg = "LSCopyApplicationURLsForBundleIdentifier failed for dev.zed.Zed";
+
+        term.draw(|frame| {
+            let area = frame.area();
+            let state = RenderState {
+                groups: &groups,
+                selection: &selection,
+                daemon_ready: true,
+                anim: &anim,
+                theme: &theme,
+                scroll_offset: 0,
+                peek_open: false,
+                jump_status: Some(msg),
+            };
+            render_frame(frame.buffer_mut(), area, &state);
+        })
+        .unwrap();
+
+        let buf = term.backend().buffer().clone();
+        let footer_y = height - 1;
+        let footer_row = row_string(&buf, width, footer_y);
+        let status_row = row_string(&buf, width, footer_y - 1);
+
+        // Footer keeps the hints, NOT the jump message.
+        assert!(
+            footer_row.contains("select") && footer_row.contains("quit"),
+            "footer should still show key hints, got: {footer_row:?}"
+        );
+        assert!(
+            !footer_row.contains("LSCopy"),
+            "footer must not contain the jump status message, got: {footer_row:?}"
+        );
+        // Status message sits on the row above the footer.
+        assert!(
+            status_row.contains("LSCopyApplicationURLsForBundleIdentifier"),
+            "status row above footer should show the jump message, got: {status_row:?}"
         );
     }
 
