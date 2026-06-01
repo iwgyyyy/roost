@@ -40,11 +40,15 @@ roost does **not** start, proxy, or control agents. It works entirely through th
 
 ## Install
 
-```sh
-# curl (macOS arm64/x86_64, Linux x86_64)
-curl -fsSL https://github.com/iwgyyyy/roost/releases/latest/download/roost-installer.sh | sh
+**curl** — macOS (arm64/x86_64) & Linux (x86_64):
 
-# from source
+```sh
+curl -fsSL https://github.com/iwgyyyy/roost/releases/latest/download/roost-installer.sh | sh
+```
+
+**From source:**
+
+```sh
 cargo install --git https://github.com/iwgyyyy/roost
 ```
 

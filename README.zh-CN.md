@@ -40,11 +40,15 @@ roost **不会**启动、代理或控制任何 agent。它完全依靠各 agent 
 
 ## 安装
 
-```sh
-# curl（macOS arm64/x86_64、Linux x86_64）
-curl -fsSL https://github.com/iwgyyyy/roost/releases/latest/download/roost-installer.sh | sh
+**curl** —— macOS（arm64/x86_64）和 Linux（x86_64）：
 
-# 从源码
+```sh
+curl -fsSL https://github.com/iwgyyyy/roost/releases/latest/download/roost-installer.sh | sh
+```
+
+**从源码：**
+
+```sh
 cargo install --git https://github.com/iwgyyyy/roost
 ```
 
