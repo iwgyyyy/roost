@@ -94,7 +94,7 @@ pub fn columns_for(width: u16) -> ColumnPlan {
 
     if width < 80 {
         // 60–79: selbar·icon·family(7)·name(12)·glyph·mid·time
-        let fixed = 2 /* selbar */ + 2 /* icon */ + 7 /* family */ + 12 /* name */ + 1 /* glyph */ + 4 /* time */ + 4; /* gaps */
+        let fixed = 2 /* selbar */ + 2 /* icon */ + 7 /* family */ + 12 /* name */ + 1 /* glyph */ + 8 /* time */ + 4; /* gaps */
         let mid_w = width.saturating_sub(fixed);
         return ColumnPlan {
             selbar: Some(2),
@@ -104,14 +104,14 @@ pub fn columns_for(width: u16) -> ColumnPlan {
             glyph: 1,
             label: None,
             mid: Some(mid_w.max(1)),
-            time: Some(4),
+            time: Some(8),
             too_small: false,
         };
     }
 
     if width < 100 {
         // 80–99: selbar·icon·family(7)·name(16)·glyph·mid·time (no label)
-        let fixed = 2 /* selbar */ + 2 /* icon */ + 7 /* family */ + 16 /* name */ + 1 /* glyph */ + 4 /* time */ + 4; /* gaps */
+        let fixed = 2 /* selbar */ + 2 /* icon */ + 7 /* family */ + 16 /* name */ + 1 /* glyph */ + 8 /* time */ + 4; /* gaps */
         let mid_w = width.saturating_sub(fixed);
         return ColumnPlan {
             selbar: Some(2),
@@ -121,7 +121,7 @@ pub fn columns_for(width: u16) -> ColumnPlan {
             glyph: 1,
             label: None,
             mid: Some(mid_w.max(1)),
-            time: Some(4),
+            time: Some(8),
             too_small: false,
         };
     }
@@ -133,7 +133,7 @@ pub fn columns_for(width: u16) -> ColumnPlan {
         + 16 /* name */
         + 1 /* glyph */
         + 10 /* label */
-        + 4 /* time */
+        + 8 /* time */
         + 5; /* gaps between columns */
     let mid_w = width.saturating_sub(fixed);
     ColumnPlan {
@@ -144,7 +144,7 @@ pub fn columns_for(width: u16) -> ColumnPlan {
         glyph: 1,
         label: Some(10),
         mid: Some(mid_w.max(50)),
-        time: Some(4),
+        time: Some(8),
         too_small: false,
     }
 }
@@ -325,10 +325,10 @@ mod tests {
         assert_eq!(plan.label, None);
         assert_eq!(plan.icon, Some(2));
         assert_eq!(plan.family, Some(7));
-        assert_eq!(plan.time, Some(4));
+        assert_eq!(plan.time, Some(8));
         assert!(plan.mid.is_some());
-        // mid = 80 - (2+2+7+16+1+4+4) = 44
-        assert_eq!(plan.mid.unwrap(), 44, "mid={}", plan.mid.unwrap());
+        // mid = 80 - (2+2+7+16+1+8+4) = 40
+        assert_eq!(plan.mid.unwrap(), 40, "mid={}", plan.mid.unwrap());
     }
 
     #[test]
@@ -337,8 +337,8 @@ mod tests {
         assert_eq!(plan.label, None);
         assert_eq!(plan.icon, Some(2));
         assert_eq!(plan.family, Some(7));
-        // mid = 99 - (2+2+7+16+1+4+4) = 63
-        assert_eq!(plan.mid.unwrap(), 63, "mid={}", plan.mid.unwrap());
+        // mid = 99 - (2+2+7+16+1+8+4) = 59
+        assert_eq!(plan.mid.unwrap(), 59, "mid={}", plan.mid.unwrap());
     }
 
     #[test]
@@ -348,9 +348,9 @@ mod tests {
         assert_eq!(plan.family, Some(7));
         assert_eq!(plan.name, 12);
         assert!(plan.mid.is_some());
-        assert_eq!(plan.time, Some(4));
-        // mid = 60 - (2+2+7+12+1+4+4) = 28
-        assert_eq!(plan.mid.unwrap(), 28, "mid={}", plan.mid.unwrap());
+        assert_eq!(plan.time, Some(8));
+        // mid = 60 - (2+2+7+12+1+8+4) = 24
+        assert_eq!(plan.mid.unwrap(), 24, "mid={}", plan.mid.unwrap());
     }
 
     #[test]

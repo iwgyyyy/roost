@@ -59,16 +59,48 @@ pub fn heartbeat(elapsed: f64) -> bool {
 
 // ── Relative time ─────────────────────────────────────────────────────────────
 
-/// Format a duration in seconds as a human-friendly relative string.
-/// < 60 s → "Ns", < 3600 s → "Nm", else "Nh".
+/// Format a duration in seconds as a compact, full-resolution string.
+///
+/// Tiers (largest unit first; trailing zero components are trimmed):
+/// - `< 1m`  → `38s`
+/// - `< 1h`  → `3m39s`
+/// - `< 1d`  → `1h34m34s`
+/// - `>= 1d` → `3d3h23m` (seconds dropped at the day tier; days never roll up
+///   into weeks/months, so three months reads as `90d`).
 pub fn relative_time(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
+    const MIN: u64 = 60;
+    const HOUR: u64 = 60 * MIN;
+    const DAY: u64 = 24 * HOUR;
+
+    // Component breakdown for the chosen tier, largest unit first.
+    let parts: Vec<(u64, char)> = if secs < MIN {
+        vec![(secs, 's')]
+    } else if secs < HOUR {
+        vec![(secs / MIN, 'm'), (secs % MIN, 's')]
+    } else if secs < DAY {
+        vec![
+            (secs / HOUR, 'h'),
+            (secs % HOUR / MIN, 'm'),
+            (secs % MIN, 's'),
+        ]
     } else {
-        format!("{}h", secs / 3600)
+        // Day tier: drop seconds; keep counting in days (no weeks/months).
+        vec![
+            (secs / DAY, 'd'),
+            (secs % DAY / HOUR, 'h'),
+            (secs % HOUR / MIN, 'm'),
+        ]
+    };
+
+    // Trim trailing zero components, but always keep the largest unit.
+    let mut end = parts.len();
+    while end > 1 && parts[end - 1].0 == 0 {
+        end -= 1;
     }
+    parts[..end]
+        .iter()
+        .map(|(v, u)| format!("{v}{u}"))
+        .collect()
 }
 
 // ── Anim aggregator ───────────────────────────────────────────────────────────
@@ -132,17 +164,28 @@ mod tests {
     }
 
     #[test]
-    fn relative_time_boundary_minutes() {
-        assert_eq!(relative_time(60), "1m");
-        assert_eq!(relative_time(90), "1m");
-        assert_eq!(relative_time(3599), "59m");
+    fn relative_time_minutes_show_seconds() {
+        assert_eq!(relative_time(60), "1m"); // 1m0s → trailing 0s trimmed
+        assert_eq!(relative_time(90), "1m30s");
+        assert_eq!(relative_time(219), "3m39s");
+        assert_eq!(relative_time(3599), "59m59s");
     }
 
     #[test]
-    fn relative_time_hours() {
-        assert_eq!(relative_time(3600), "1h");
+    fn relative_time_hours_show_h_m_s() {
+        assert_eq!(relative_time(3600), "1h"); // 1h0m0s → trimmed
         assert_eq!(relative_time(7200), "2h");
-        assert_eq!(relative_time(3601), "1h");
+        assert_eq!(relative_time(3601), "1h0m1s"); // middle zero kept
+        assert_eq!(relative_time(5674), "1h34m34s");
+    }
+
+    #[test]
+    fn relative_time_days_drop_seconds() {
+        assert_eq!(relative_time(86_400), "1d"); // exactly 1 day
+        assert_eq!(relative_time(271_380), "3d3h23m");
+        // Three months keeps counting in days, no seconds at the day tier.
+        assert_eq!(relative_time(90 * 86_400), "90d");
+        assert_eq!(relative_time(90 * 86_400 + 3 * 3600 + 23 * 60), "90d3h23m");
     }
 
     // ── spinner_frame ──────────────────────────────────────────────────────
