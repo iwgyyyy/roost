@@ -134,6 +134,31 @@ impl Executor for RealExecutor {
             false
         }
     }
+
+    fn send_unix_rpc(&self, socket_path: &str, body: &str) -> bool {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::net::UnixStream;
+            use std::time::Duration;
+
+            match UnixStream::connect(socket_path) {
+                Ok(mut stream) => {
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                    let mut line = String::with_capacity(body.len() + 1);
+                    line.push_str(body);
+                    line.push('\n');
+                    stream.write_all(line.as_bytes()).is_ok()
+                }
+                Err(_) => false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (socket_path, body);
+            false
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

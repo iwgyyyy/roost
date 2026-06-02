@@ -193,6 +193,7 @@ agent 触发 hook
 | Codex.app | 会话级 | `codex://threads/<id>` deep link |
 | Ghostty、iTerm2、Terminal.app | tab/pane 级 | AppleScript |
 | WezTerm | pane 级 | `wezterm cli activate-pane` |
+| cmux | surface 级 | 经其 Unix socket 发 `surface.focus` JSON-RPC |
 | Zellij | session 级 | `zellij action` CLI |
 | tmux | pane 级 | `tmux switch-client` + `select-pane` |
 | Warp | 近似 | Warp SQLite + 键盘模拟（脆弱） |

@@ -117,6 +117,10 @@ pub fn detect_host(env: &HashMap<String, String>) -> String {
     if env.contains_key("TMUX") {
         return "tmux".to_string();
     }
+    // cmux: a standalone terminal that sets its own env vars (no TERM_PROGRAM)
+    if env.contains_key("CMUX_WORKSPACE_ID") || env.contains_key("CMUX_SOCKET_PATH") {
+        return "cmux".to_string();
+    }
 
     // Editor-hosted terminals via env hints
     // VS Code / forks set VSCODE_INJECTION, VSCODE_CWD or TERM_PROGRAM
@@ -263,6 +267,7 @@ fn collect_locators_inner(env: &HashMap<String, String>, terminal_tty: Option<St
     let terminal_session_id = env
         .get("ITERM_SESSION_ID")
         .or_else(|| env.get("GHOSTTY_SESSION_ID"))
+        .or_else(|| env.get("CMUX_SURFACE_ID"))
         .cloned();
 
     // tmux: $TMUX = socket,pid,session-id  →  $TMUX_PANE = pane target

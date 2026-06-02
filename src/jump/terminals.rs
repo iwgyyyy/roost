@@ -146,26 +146,52 @@ pub fn jump_zellij(session: &str, executor: &dyn Executor) -> Option<JumpOutcome
 // ── cmux ──────────────────────────────────────────────────────────────────────
 
 /// Build the cmux `surface.focus` JSON-RPC request body.
-pub fn cmux_focus_rpc_body(session_id: &str) -> String {
+pub fn cmux_focus_rpc_body(surface_id: &str) -> String {
     serde_json::json!({
         "jsonrpc": "2.0",
         "method": "surface.focus",
-        "params": { "session_id": session_id },
+        "params": { "surface_id": surface_id },
         "id": 1
     })
     .to_string()
 }
 
-/// Execute a cmux jump (best-effort via activate app; actual RPC left for real platform).
-pub fn jump_cmux(executor: &dyn Executor) -> Option<JumpOutcome> {
-    // cmux has no standard CLI binary; we activate it via bundle id
-    let (_, ok) = executor.run("cmux", &["focus"]);
-    if ok {
-        Some(JumpOutcome::Activated {
-            message: "Activated cmux".to_string(),
+/// Resolve the cmux control-socket path.
+///
+/// cmux writes its live socket path to `/tmp/cmux-last-socket-path` on startup;
+/// prefer that, then the default support-dir socket, then a legacy `/tmp` path.
+/// Returns a best-guess path regardless of existence — a dead path just makes
+/// the RPC fail, and the caller falls back to activating the app.
+pub fn resolve_cmux_socket_path() -> String {
+    if let Ok(contents) = std::fs::read_to_string("/tmp/cmux-last-socket-path") {
+        let p = contents.trim();
+        if !p.is_empty() {
+            return p.to_string();
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let default = format!("{home}/Library/Application Support/cmux/cmux.sock");
+        if std::path::Path::new(&default).exists() {
+            return default;
+        }
+    }
+    "/tmp/cmux.sock".to_string()
+}
+
+/// Execute a cmux jump: focus the surface via a Unix-socket JSON-RPC call, then
+/// bring the app to the front. Returns `None` (so the caller falls back to
+/// activating the app) when the socket write fails.
+pub fn jump_cmux(surface_id: &str, executor: &dyn Executor) -> Option<JumpOutcome> {
+    let socket = resolve_cmux_socket_path();
+    let body = cmux_focus_rpc_body(surface_id);
+    if executor.send_unix_rpc(&socket, &body) {
+        // The RPC focuses the surface inside cmux; activating brings cmux forward.
+        let _ = executor.activate_app("com.cmuxterm.app");
+        Some(JumpOutcome::Focused {
+            message: format!("Focused cmux surface {surface_id}"),
         })
     } else {
-        None // caller will apply fallback
+        None
     }
 }
 
@@ -383,10 +409,10 @@ mod tests {
 
     #[test]
     fn cmux_focus_rpc_body_is_valid_json() {
-        let body = cmux_focus_rpc_body("sess-1");
+        let body = cmux_focus_rpc_body("surface-1");
         let v: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(v["method"], "surface.focus");
-        assert_eq!(v["params"]["session_id"], "sess-1");
+        assert_eq!(v["params"]["surface_id"], "surface-1");
         assert_eq!(v["jsonrpc"], "2.0");
     }
 

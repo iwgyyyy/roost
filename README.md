@@ -195,6 +195,7 @@ Press **`o`** to jump back to the agent's terminal window. Best-effort — preci
 | Codex.app | conversation | `codex://threads/<id>` deep link |
 | Ghostty, iTerm2, Terminal.app | tab/pane | AppleScript |
 | WezTerm | pane | `wezterm cli activate-pane` |
+| cmux | surface | `surface.focus` JSON-RPC over its Unix socket |
 | Zellij | session | `zellij action` CLI |
 | tmux | pane | `tmux switch-client` + `select-pane` |
 | Warp | approximate | Warp SQLite + keyboard simulation (fragile) |

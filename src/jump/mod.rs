@@ -61,8 +61,8 @@ pub enum JumpStrategy {
     WeztermCli { pane_id: String },
     /// Use the Zellij CLI (`zellij action go-to-tab`).
     ZellijCli { session: String },
-    /// Use a cmux Unix socket JSON-RPC call.
-    CmuxRpc,
+    /// Use a cmux Unix socket JSON-RPC call to focus a surface.
+    CmuxRpc { surface_id: String },
     /// Use tmux CLI (`switch-client`, `select-window`, `select-pane`).
     TmuxCli { target: String },
     /// Use Warp SQLite + keyboard simulation.
@@ -143,7 +143,18 @@ pub fn plan_jump(target: &JumpTarget) -> JumpStrategy {
                 };
             }
             if name == "cmux" {
-                return JumpStrategy::CmuxRpc;
+                if let Some(sid) = target.terminal_session_id.as_deref() {
+                    return JumpStrategy::CmuxRpc {
+                        surface_id: sid.to_string(),
+                    };
+                }
+                // No surface id captured → activate the app by bundle id.
+                if let Some(bundle) = descriptor.and_then(|d| d.bundle_id) {
+                    return JumpStrategy::ActivateApp {
+                        bundle_id: bundle.to_string(),
+                    };
+                }
+                return JumpStrategy::Unsupported;
             }
             // AppleScript path for Ghostty / iTerm2 / Terminal.app / others
             if let Some(bundle) = descriptor.and_then(|d| d.bundle_id) {
@@ -242,6 +253,12 @@ pub trait Executor: Send + Sync {
     fn run_applescript(&self, script: &str) -> (String, bool);
     /// Open a directory path in Finder / file manager.
     fn open_dir(&self, path: &str) -> bool;
+    /// Send a single-line JSON-RPC body to a Unix-domain socket (used by cmux).
+    /// Returns whether the write succeeded. Default returns false for executors
+    /// without socket support.
+    fn send_unix_rpc(&self, _socket_path: &str, _body: &str) -> bool {
+        false
+    }
 }
 
 // ── jump ─────────────────────────────────────────────────────────────────────
@@ -279,9 +296,8 @@ fn execute_strategy(
             .unwrap_or_else(|| fallback_activate(target, executor)),
         JumpStrategy::WeztermCli { ref pane_id } => terminals::jump_wezterm(pane_id, executor)
             .unwrap_or_else(|| fallback_activate(target, executor)),
-        JumpStrategy::CmuxRpc => {
-            terminals::jump_cmux(executor).unwrap_or_else(|| fallback_activate(target, executor))
-        }
+        JumpStrategy::CmuxRpc { ref surface_id } => terminals::jump_cmux(surface_id, executor)
+            .unwrap_or_else(|| fallback_activate(target, executor)),
         JumpStrategy::WarpSqlite => warp::jump_warp(target, executor),
         JumpStrategy::AppleScript { ref host } => {
             terminals::jump_applescript(host, target, executor)
@@ -447,6 +463,12 @@ mod tests {
             self.record(format!("open_dir:{path}"));
             self.matches_succeed(path)
         }
+
+        fn send_unix_rpc(&self, socket_path: &str, body: &str) -> bool {
+            let key = format!("{socket_path} {body}");
+            self.record(format!("send_unix_rpc:{key}"));
+            self.matches_succeed(&key)
+        }
     }
 
     fn make_target(host: &str) -> JumpTarget {
@@ -524,6 +546,59 @@ mod tests {
         assert!(
             matches!(s, JumpStrategy::WeztermCli { .. }),
             "expected WeztermCli, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn plan_jump_cmux_with_surface_id_gives_cmux_rpc() {
+        // make_target sets terminal_session_id, which carries the cmux surface id.
+        let t = make_target("cmux");
+        let s = plan_jump(&t);
+        assert!(
+            matches!(s, JumpStrategy::CmuxRpc { ref surface_id } if surface_id == "iterm-sess"),
+            "expected CmuxRpc with surface id, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn plan_jump_cmux_no_surface_id_falls_back_to_activate_app() {
+        let mut t = make_target("cmux");
+        t.terminal_session_id = None;
+        let s = plan_jump(&t);
+        assert!(
+            matches!(s, JumpStrategy::ActivateApp { ref bundle_id } if bundle_id == "com.cmuxterm.app"),
+            "expected ActivateApp fallback when no surface id, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn cmux_rpc_success_gives_focused_and_sends_socket() {
+        let t = make_target("cmux");
+        let exec = MockExecutor::new_succeed_all();
+        let outcome = jump(&t, &exec);
+        assert!(
+            matches!(outcome, JumpOutcome::Focused { .. }),
+            "expected Focused, got: {outcome:?}"
+        );
+        let calls = exec.recorded_calls();
+        assert!(
+            calls.iter().any(|c| c.starts_with("send_unix_rpc:")),
+            "should have sent a unix-socket RPC; calls: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn cmux_rpc_socket_failure_falls_back_to_activate_app() {
+        // Socket write fails; cmux has a bundle id, so we activate the app.
+        let t = make_target("cmux");
+        let exec = MockExecutor {
+            succeed_patterns: vec!["com.cmuxterm.app".to_string()],
+            ..Default::default()
+        };
+        let outcome = jump(&t, &exec);
+        assert!(
+            matches!(outcome, JumpOutcome::Activated { .. }),
+            "expected Activated fallback, got: {outcome:?}"
         );
     }
 

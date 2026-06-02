@@ -106,7 +106,7 @@ static REGISTRY: &[HostDescriptor] = &[
     HostDescriptor {
         name: "cmux",
         display_name: "cmux",
-        bundle_id: None, // Unix socket app, no bundle id
+        bundle_id: Some("com.cmuxterm.app"), // socket RPC focuses the surface; bundle id is the activate fallback
         category: HostCategory::Terminal,
         tui_label: " cmux",
     },
@@ -488,10 +488,12 @@ mod tests {
         assert!(descriptor_for("ghostty").unwrap().bundle_id.is_some());
         assert!(descriptor_for("iterm2").unwrap().bundle_id.is_some());
         assert!(descriptor_for("codex").unwrap().bundle_id.is_some());
-        // tmux / cmux / zellij have no bundle id
+        // cmux focuses its surface via a Unix-socket RPC, but also carries a
+        // bundle id for the activate-app fallback.
+        assert!(descriptor_for("cmux").unwrap().bundle_id.is_some());
+        // tmux / zellij are multiplexers with no app bundle id
         assert!(descriptor_for("tmux").unwrap().bundle_id.is_none());
         assert!(descriptor_for("zellij").unwrap().bundle_id.is_none());
-        assert!(descriptor_for("cmux").unwrap().bundle_id.is_none());
     }
 
     #[test]
