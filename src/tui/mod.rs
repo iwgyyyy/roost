@@ -9,6 +9,7 @@ pub mod client;
 pub mod layout;
 pub mod peek;
 pub mod render;
+pub mod settings;
 pub mod stats;
 pub mod theme;
 pub mod viewmodel;
@@ -24,6 +25,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
+use crate::config;
 use crate::history;
 use crate::jump::platform::RealExecutor;
 use crate::jump::{JumpOutcome, jump};
@@ -32,6 +34,7 @@ use crate::sock;
 use anim::Anim;
 use layout::{PeekPlacement, peek_placement, split_for_inline_peek, visible_window};
 use render::{RenderState, render_frame};
+use settings::{Cursor as SettingsCursor, Dir as SettingsDir};
 use theme::Theme;
 use viewmodel::{Selection, group_and_sort, total_rows};
 
@@ -110,6 +113,12 @@ pub fn run_tui() -> Result<()> {
     let mut stats_data: Option<stats::StatsData> = None;
     // Number of logical lines scrolled past at the top of the stats page.
     let mut stats_scroll: usize = 0;
+
+    // Settings page state.
+    let mut settings_open = false;
+    let mut settings_scroll: usize = 0;
+    let mut settings_cfg = config::Config::default();
+    let mut settings_cursor = SettingsCursor::default();
 
     // Jump status: message shown in footer + timestamp for auto-clear
     let mut jump_status: Option<String> = None;
@@ -262,6 +271,15 @@ pub fn run_tui() -> Result<()> {
             stats_scroll = 0;
         }
 
+        // Clamp settings scroll against its content height.
+        if settings_open {
+            let body_h = terminal_height.saturating_sub(2) as usize;
+            let total = settings::line_count(&settings_cfg);
+            settings_scroll = settings_scroll.min(total.saturating_sub(body_h));
+        } else {
+            settings_scroll = 0;
+        }
+
         let peek_open_snap = peek_open;
         let peek_detail_snap = peek_detail.clone();
         let placement_snap = placement.clone();
@@ -270,10 +288,24 @@ pub fn run_tui() -> Result<()> {
         let stats_open_snap = stats_open;
         let stats_data_snap = stats_data.clone();
         let stats_scroll_snap = stats_scroll;
+        let settings_open_snap = settings_open;
+        let settings_cfg_snap = settings_cfg.clone();
+        let settings_scroll_snap = settings_scroll;
+        let settings_cursor_snap = settings_cursor;
         terminal.draw(|frame| {
             let full_area = frame.area();
 
-            if stats_open_snap {
+            if settings_open_snap {
+                // The settings page takes over the whole screen.
+                settings::render_settings(
+                    frame.buffer_mut(),
+                    full_area,
+                    &settings_cfg_snap,
+                    &theme,
+                    settings_scroll_snap,
+                    settings_cursor_snap,
+                );
+            } else if stats_open_snap {
                 // The stats page takes over the whole screen.
                 let data = stats_data_snap.clone().unwrap_or_default();
                 stats::render_stats(frame.buffer_mut(), full_area, &data, &theme, stats_scroll_snap);
@@ -346,6 +378,7 @@ pub fn run_tui() -> Result<()> {
                     &mut selected_id,
                     peek_open,
                     stats_open,
+                    settings_open,
                 );
                 match action {
                     KeyAction::Quit => break,
@@ -370,6 +403,40 @@ pub fn run_tui() -> Result<()> {
                         stats_data = None;
                         stats_conn = None;
                         stats_scroll = 0;
+                    }
+                    KeyAction::OpenSettings => {
+                        // Opening settings supersedes peek and stats panels.
+                        peek_open = false;
+                        peek_detail = None;
+                        stats_open = false;
+                        settings_cfg = config::load();
+                        settings_cursor = SettingsCursor::default();
+                        settings_scroll = 0;
+                        settings_open = true;
+                    }
+                    KeyAction::CloseSettings => {
+                        settings_open = false;
+                        settings_scroll = 0;
+                    }
+                    KeyAction::SettingsMove(dir) => {
+                        settings_cursor = settings::move_cursor(settings_cursor, dir);
+                        // Auto-scroll to keep the cursor's toggle row visible.
+                        // body_h mirrors the renderer: area.height - 2 border rows.
+                        let body_h = terminal_height.saturating_sub(2) as usize;
+                        let line = settings::cursor_line(settings_cursor);
+                        if line < settings_scroll {
+                            settings_scroll = line;
+                        } else if body_h > 0 && line >= settings_scroll + body_h {
+                            settings_scroll = line - body_h + 1;
+                        }
+                    }
+                    KeyAction::SettingsToggle => {
+                        let new_cfg = settings::toggle(&settings_cfg, settings_cursor);
+                        if let Err(e) = config::save(&new_cfg) {
+                            // Best-effort: log the error but don't crash the TUI.
+                            eprintln!("roost: failed to save settings: {e}");
+                        }
+                        settings_cfg = new_cfg;
                     }
                     KeyAction::TogglePeek => {
                         if peek_open {
@@ -498,11 +565,20 @@ enum KeyAction {
     ToggleStats,
     /// Close the stats page (Esc while it is open).
     CloseStats,
+    /// Open the settings page (`c` key).
+    OpenSettings,
+    /// Close the settings page (Esc while it is open).
+    CloseSettings,
+    /// Move the settings cursor.
+    SettingsMove(SettingsDir),
+    /// Toggle the currently highlighted setting switch (Space).
+    SettingsToggle,
     /// No special action needed.
     None,
 }
 
 /// Handle a key event. Returns the action to take.
+#[allow(clippy::too_many_arguments)]
 fn handle_key(
     key: KeyEvent,
     selection: &mut Selection,
@@ -511,7 +587,24 @@ fn handle_key(
     selected_id: &mut Option<String>,
     peek_open: bool,
     stats_open: bool,
+    settings_open: bool,
 ) -> KeyAction {
+    // When the settings page is open it owns the screen.
+    if settings_open {
+        return match key.code {
+            KeyCode::Char('q') => KeyAction::Quit,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyAction::Quit,
+            KeyCode::Esc => KeyAction::CloseSettings,
+            KeyCode::Up | KeyCode::Char('k') => KeyAction::SettingsMove(SettingsDir::Up),
+            KeyCode::Down | KeyCode::Char('j') => KeyAction::SettingsMove(SettingsDir::Down),
+            KeyCode::Left | KeyCode::Char('h') => KeyAction::SettingsMove(SettingsDir::Left),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                KeyAction::SettingsMove(SettingsDir::Right)
+            }
+            KeyCode::Char(' ') => KeyAction::SettingsToggle,
+            _ => KeyAction::None,
+        };
+    }
     // When the stats page is open it owns the screen: scroll / quit / close.
     if stats_open {
         return match key.code {
@@ -540,6 +633,8 @@ fn handle_key(
         KeyCode::Char('o') => return KeyAction::Jump,
         // `s` = toggle the stats page (only from the list view).
         KeyCode::Char('s') if !peek_open => return KeyAction::ToggleStats,
+        // `c` = open the settings page (only from the list view).
+        KeyCode::Char('c') if !peek_open => return KeyAction::OpenSettings,
         // Tab / Shift-Tab always switch the selected session, wrapping around.
         KeyCode::Tab => {
             selection.cycle_next(n_rows);

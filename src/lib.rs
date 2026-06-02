@@ -1,3 +1,4 @@
+pub mod config;
 pub mod daemon;
 pub mod history;
 pub mod hook;
@@ -5,6 +6,7 @@ pub mod jump;
 pub mod list;
 pub mod liveness;
 pub mod naming;
+pub mod notify;
 pub mod protocol;
 pub mod session;
 pub mod setup;

@@ -328,22 +328,23 @@ pub fn render_footer_border(buf: &mut Buffer, area: Rect, theme: &Theme, peek_op
     let keys: String = if peek_open {
         "↑/↓ scroll · tab switch · esc close · q quit".to_string()
     } else {
-        "↑/↓ j/k select · enter peek · o jump · s stats · q quit".to_string()
+        "↑/↓ j/k select · enter peek · o jump · s stats · c settings · q quit".to_string()
     };
 
     // "╰── <keys> ──╯"
     let left = "╰── ";
     let right = " ──╯";
-    let fill_avail = w
-        .saturating_sub(UnicodeWidthStr::width(left))
-        .saturating_sub(UnicodeWidthStr::width(keys.as_str()))
-        .saturating_sub(UnicodeWidthStr::width(right));
+    let left_w = UnicodeWidthStr::width(left);
+    let right_w = UnicodeWidthStr::width(right);
+    let keys_max = w.saturating_sub(left_w).saturating_sub(right_w);
+    let keys = layout::truncate_to_width(&keys, keys_max);
+    let fill_avail = keys_max.saturating_sub(UnicodeWidthStr::width(keys.as_str()));
     let fill = "─".repeat(fill_avail);
     let line = format!("{left}{keys}{fill}{right}");
     buf.set_string(x, y, &line, Style::default().fg(theme.border));
     // keys in dim — start column in display columns (not bytes)
     buf.set_string(
-        x + UnicodeWidthStr::width(left) as u16,
+        x + left_w as u16,
         y,
         keys.as_str(),
         Style::default().fg(theme.dim),

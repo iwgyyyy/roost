@@ -7,11 +7,13 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
+use crate::config;
 use crate::history::{ClosedTurn, History};
 use crate::liveness;
 use crate::naming::resolve_name;
-use crate::protocol::{Event, Request, SessionDetail, SessionView};
-use crate::session::AgentSession;
+use crate::notify;
+use crate::protocol::{AgentFamily, Event, Request, SessionDetail, SessionView};
+use crate::session::{AgentSession, AgentState};
 use crate::sock;
 
 /// Shared, optional history writer. `None` if the DB could not be opened — in
@@ -305,29 +307,58 @@ fn handle_connection(
                 // Collect any turns closed by this event so they can be written
                 // to the history DB *after* the sessions lock is released (DB I/O
                 // must not be held under the hot sessions mutex).
+                //
+                // Similarly, collect any notification payload (family, name,
+                // activity, target state) for edge-triggered notifications.
+                // Both are gathered inside the lock and processed outside.
                 let mut closed: Vec<ClosedTurn> = Vec::new();
+                // Captured under the lock, fired after it drops — never spawn while holding the sessions mutex.
+                let mut notify_payload: Option<(AgentFamily, String, Option<String>, AgentState)> =
+                    None;
                 {
                     let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
 
                     let session_ended = if let Some(session) = st.sessions.get_mut(&session_id) {
+                        let old = session.state;
                         let ended = session.apply(&event);
+                        let new = session.state;
                         if let Some(t) = session.take_closed_turn() {
                             closed.push(t);
                         }
                         if ended && let Some(t) = session.flush_open_turn() {
                             closed.push(t);
+                        }
+                        // Edge detection: record payload if this transition should notify.
+                        if let Some(target) = notify::trigger_for_transition(old, new) {
+                            notify_payload = Some((
+                                session.family.clone(),
+                                session.name.clone(),
+                                session.activity.clone(),
+                                target,
+                            ));
                         }
                         ended
                     } else {
                         // New session: create then apply
                         let mut session = AgentSession::new(&event);
                         session.name = resolved_name.unwrap_or_else(|| resolve_name(&cwd));
+                        let old = session.state;
                         let ended = session.apply(&event);
+                        let new = session.state;
                         if let Some(t) = session.take_closed_turn() {
                             closed.push(t);
                         }
                         if ended && let Some(t) = session.flush_open_turn() {
                             closed.push(t);
+                        }
+                        // Edge detection for new session.
+                        if let Some(target) = notify::trigger_for_transition(old, new) {
+                            notify_payload = Some((
+                                session.family.clone(),
+                                session.name.clone(),
+                                session.activity.clone(),
+                                target,
+                            ));
                         }
                         st.sessions.insert(session_id.clone(), session);
                         // Initialise liveness entry.
@@ -347,6 +378,18 @@ fn handle_connection(
                 }
 
                 record_turns(&history, &closed);
+
+                // Fire notification outside the sessions lock (notify::fire may
+                // spawn subprocesses; holding the lock during a spawn is forbidden).
+                if let Some((family, name, activity, target)) = notify_payload {
+                    let cfg = config::load();
+                    if let Some(stage) = cfg.stage_for(target) {
+                        notify::fire(
+                            &family, &name, activity.as_deref(),
+                            target, stage.banner, stage.sound,
+                        );
+                    }
+                }
             }
             Request::List => {
                 let views = {
@@ -459,7 +502,7 @@ mod tests {
         let mut state = DaemonState::new();
 
         // Add sessions manually for testing
-        use crate::protocol::{AgentFamily, EventKind, HookEvent};
+        use crate::protocol::{EventKind, HookEvent};
 
         let start_ev = HookEvent {
             kind: EventKind::SessionStart,
@@ -506,7 +549,7 @@ mod tests {
     /// up as `now` advances.
     #[test]
     fn detail_since_is_frozen_when_done() {
-        use crate::protocol::{AgentFamily, EventKind, HookEvent};
+        use crate::protocol::{EventKind, HookEvent};
         use std::time::Duration;
 
         let start_ev = HookEvent {
@@ -549,13 +592,82 @@ mod tests {
         assert_eq!(a, b, "since must not advance after the session is Done");
     }
 
+    /// 状态边沿测试：Working → Approval 通知边沿（带 permission 关键词的 Notification）
+    /// 以及 Working → Working（PostToolUse 保持 Working）不触发通知。
+    /// 注意：只验证 trigger_for_transition 的计算结果，不调用 fire。
+    #[test]
+    fn edge_working_to_approval_triggers_notification() {
+        use crate::protocol::{EventKind, HookEvent};
+
+        let start_ev = HookEvent {
+            kind: EventKind::SessionStart,
+            family: AgentFamily::Claude,
+            session_id: "edge-test".to_string(),
+            cwd: "/tmp".to_string(),
+            pid: None,
+            tool_name: None,
+            tool_input: None,
+            prompt: None,
+            notification: None,
+            host_app: None,
+            host_bundle_id: None,
+            terminal_session_id: None,
+            terminal_tty: None,
+            tmux_target: None,
+            wezterm_pane: None,
+            zellij_session: None,
+            workspace_path: None,
+            codex_thread_id: None,
+            pane_title: None,
+        };
+
+        // SessionStart → Idle
+        let mut session = AgentSession::new(&start_ev);
+        session.apply(&start_ev);
+        assert_eq!(session.state, AgentState::Idle);
+
+        // UserPromptSubmit → Working
+        let mut prompt_ev = start_ev.clone();
+        prompt_ev.kind = EventKind::UserPromptSubmit;
+        session.apply(&prompt_ev);
+        assert_eq!(session.state, AgentState::Working);
+
+        // PostToolUse: Working → Working，边沿计算应为 None
+        let mut post_ev = start_ev.clone();
+        post_ev.kind = EventKind::PostToolUse;
+        post_ev.tool_name = Some("Bash".to_string());
+        let old = session.state;
+        session.apply(&post_ev);
+        let new = session.state;
+        assert_eq!(session.state, AgentState::Working);
+        assert_eq!(
+            notify::trigger_for_transition(old, new),
+            None,
+            "Working→Working (PostToolUse) 不应触发通知"
+        );
+
+        // Notification with "permission" → Working → Approval，边沿计算应为 Some(Approval)
+        let mut notif_ev = start_ev.clone();
+        notif_ev.kind = EventKind::Notification;
+        notif_ev.notification = Some("Claude needs your permission to run: git push".to_string());
+        let old = session.state;
+        session.apply(&notif_ev);
+        let new = session.state;
+        assert_eq!(session.state, AgentState::Approval);
+        assert_eq!(
+            notify::trigger_for_transition(old, new),
+            Some(AgentState::Approval),
+            "Working→Approval 应触发通知"
+        );
+    }
+
     /// Regression: completed-step durations in the peek "recent" list must be
     /// FROZEN — identical no matter what `now` we render at. The previous
     /// implementation subtracted two separately-floored ages, which flickered by
     /// ±1s as the clock advanced (the "乱跳" the user observed).
     #[test]
     fn recent_event_durations_are_stable_across_now() {
-        use crate::protocol::{AgentFamily, EventKind, HookEvent};
+        use crate::protocol::{EventKind, HookEvent};
         use crate::session::StoredEvent;
         use std::time::Duration;
 
