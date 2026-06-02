@@ -8,8 +8,13 @@
 //! itself) — those leave a receipt. Source installs (`cargo install`) have no
 //! receipt and are pointed at the right command instead.
 
+use std::process::Command;
+use std::time::{Duration, Instant};
+
 use anyhow::{Result, anyhow};
 use axoupdater::AxoUpdater;
+
+use crate::sock;
 
 const INSTALLER_URL: &str =
     "https://github.com/iwgyyyy/roost/releases/latest/download/roost-installer.sh";
@@ -34,8 +39,51 @@ pub fn run_update() -> Result<()> {
         .run_sync()
         .map_err(|e| anyhow!("update failed: {e}"))?
     {
-        Some(result) => println!("Updated roost to {}.", result.new_version),
+        Some(result) => {
+            println!("Updated roost to {}.", result.new_version);
+            // The new binary is now on disk, but a daemon that is already
+            // running still holds the OLD code in memory — restart it so the
+            // update (e.g. history recording) takes effect immediately.
+            restart_daemon_if_running();
+        }
         None => println!("roost is already the latest version."),
     }
     Ok(())
+}
+
+/// Stop a running daemon and start the new binary in its place. No-op if no
+/// daemon is running — the next `roost` launch starts the new binary itself.
+fn restart_daemon_if_running() {
+    let path = sock::socket_path();
+    if !sock::is_listening(&path) {
+        return; // nothing running; next `roost` launch picks up the new binary
+    }
+
+    // Stop the old daemon. `pkill` works regardless of the daemon's version (a
+    // graceful socket shutdown would not — daemons before this release don't
+    // understand it). The running process here is `roost update`, never
+    // `roost daemon`, so this does not target ourselves.
+    let _ = Command::new("pkill").args(["-f", "roost daemon"]).status();
+
+    // Wait (bounded) for the old daemon to release the socket.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && sock::is_listening(&path) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    if sock::is_listening(&path) {
+        // Could not stop it (e.g. `pkill` unavailable) — don't claim success.
+        eprintln!(
+            "Note: the running daemon couldn't be stopped automatically. Run \
+             `pkill -f 'roost daemon'` or restart it to pick up the new version."
+        );
+        return;
+    }
+
+    match sock::ensure_daemon() {
+        Ok(()) => println!("Restarted the roost daemon on the new version."),
+        Err(e) => eprintln!(
+            "Note: couldn't start the new daemon ({e}); it will start on your next `roost`."
+        ),
+    }
 }
