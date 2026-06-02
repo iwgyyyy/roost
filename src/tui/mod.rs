@@ -108,6 +108,8 @@ pub fn run_tui() -> Result<()> {
     let mut stats_open = false;
     let mut stats_conn: Option<rusqlite::Connection> = None;
     let mut stats_data: Option<stats::StatsData> = None;
+    // Number of logical lines scrolled past at the top of the stats page.
+    let mut stats_scroll: usize = 0;
 
     // Jump status: message shown in footer + timestamp for auto-clear
     let mut jump_status: Option<String> = None;
@@ -249,6 +251,17 @@ pub fn run_tui() -> Result<()> {
             peek_scroll = 0;
         }
 
+        // Clamp the stats scroll against its content height. The page body is
+        // `height - 2` rows (top + bottom borders), mirroring the peek clamp so
+        // ↑/↓ never get stuck past the end.
+        if stats_open {
+            let body_h = terminal_height.saturating_sub(2) as usize;
+            let total = stats_data.as_ref().map(stats::line_count).unwrap_or(0);
+            stats_scroll = stats_scroll.min(total.saturating_sub(body_h));
+        } else {
+            stats_scroll = 0;
+        }
+
         let peek_open_snap = peek_open;
         let peek_detail_snap = peek_detail.clone();
         let placement_snap = placement.clone();
@@ -256,13 +269,14 @@ pub fn run_tui() -> Result<()> {
         let peek_scroll_snap = peek_scroll;
         let stats_open_snap = stats_open;
         let stats_data_snap = stats_data.clone();
+        let stats_scroll_snap = stats_scroll;
         terminal.draw(|frame| {
             let full_area = frame.area();
 
             if stats_open_snap {
                 // The stats page takes over the whole screen.
                 let data = stats_data_snap.clone().unwrap_or_default();
-                stats::render_stats(frame.buffer_mut(), full_area, &data, &theme);
+                stats::render_stats(frame.buffer_mut(), full_area, &data, &theme, stats_scroll_snap);
             } else if peek_open_snap {
                 match placement_snap {
                     PeekPlacement::Inline => {
@@ -340,6 +354,7 @@ pub fn run_tui() -> Result<()> {
                             stats_open = false;
                             stats_data = None;
                             stats_conn = None;
+                            stats_scroll = 0;
                         } else {
                             // Opening stats supersedes the peek panel.
                             peek_open = false;
@@ -347,12 +362,14 @@ pub fn run_tui() -> Result<()> {
                             stats_conn = history::open_readonly().ok();
                             stats_data = stats_conn.as_ref().map(stats::compute);
                             stats_open = true;
+                            stats_scroll = 0;
                         }
                     }
                     KeyAction::CloseStats => {
                         stats_open = false;
                         stats_data = None;
                         stats_conn = None;
+                        stats_scroll = 0;
                     }
                     KeyAction::TogglePeek => {
                         if peek_open {
@@ -397,11 +414,19 @@ pub fn run_tui() -> Result<()> {
                         }
                     }
                     KeyAction::ScrollUp => {
-                        peek_scroll = peek_scroll.saturating_sub(1);
+                        // Clamped against content height before rendering.
+                        if stats_open {
+                            stats_scroll = stats_scroll.saturating_sub(1);
+                        } else {
+                            peek_scroll = peek_scroll.saturating_sub(1);
+                        }
                     }
                     KeyAction::ScrollDown => {
-                        // Clamped against the panel capacity before rendering.
-                        peek_scroll = peek_scroll.saturating_add(1);
+                        if stats_open {
+                            stats_scroll = stats_scroll.saturating_add(1);
+                        } else {
+                            peek_scroll = peek_scroll.saturating_add(1);
+                        }
                     }
                     KeyAction::Jump => {
                         // Build JumpTarget from current selection and launch in background
@@ -487,12 +512,14 @@ fn handle_key(
     peek_open: bool,
     stats_open: bool,
 ) -> KeyAction {
-    // When the stats page is open it owns the screen: only quit / close / toggle.
+    // When the stats page is open it owns the screen: scroll / quit / close.
     if stats_open {
         return match key.code {
             KeyCode::Char('q') => KeyAction::Quit,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyAction::Quit,
             KeyCode::Esc | KeyCode::Char('s') => KeyAction::CloseStats,
+            KeyCode::Up | KeyCode::Char('k') => KeyAction::ScrollUp,
+            KeyCode::Down | KeyCode::Char('j') => KeyAction::ScrollDown,
             _ => KeyAction::None,
         };
     }

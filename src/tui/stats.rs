@@ -4,6 +4,10 @@
 //! This module is presentation only — it pulls aggregates from `crate::history`
 //! (the data layer) and renders them. The TUI holds a persistent read-only
 //! connection and recomputes [`StatsData`] on the normal fetch cadence.
+//!
+//! The page is fully scrollable: content is built into a flat list of logical
+//! lines, then a window of `height - 2` lines is drawn at the current scroll
+//! offset, with `▲`/`▼` affordances so nothing is ever silently cut off.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -70,150 +74,117 @@ fn bar(value: i64, max: i64, width: usize) -> String {
     "█".repeat(n.clamp(1, width))
 }
 
-/// Render the full-screen stats page into `buf`.
-pub fn render_stats(buf: &mut Buffer, area: Rect, data: &StatsData, theme: &Theme) {
-    if area.height < 2 || area.width < 10 {
-        return;
-    }
-    let x = area.x;
-    let w = area.width as usize;
+// ── Logical lines ───────────────────────────────────────────────────────────
+//
+// The page is rendered into a flat `Vec<Line>` first; scrolling then draws a
+// window of those lines. A `Line` is a set of styled segments placed at a
+// column offset (relative to the page's left edge).
+
+struct Seg {
+    col: u16,
+    text: String,
+    style: Style,
+}
+type Line = Vec<Seg>;
+
+/// Number of logical lines the page has for `data` (width-independent — used to
+/// clamp the scroll offset). Built from the same source as `render_stats`.
+pub fn line_count(data: &StatsData) -> usize {
+    build_lines(data, 0).len()
+}
+
+fn build_lines(data: &StatsData, w: usize) -> Vec<Line> {
     let accent = theme::COLOR_ACCENT;
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Vec::new()); // breathing room under the top border
 
-    // Top + bottom chrome.
-    top_border(buf, x, area.y, area.width, theme, accent, "roost · stats");
-    let footer_y = area.y + area.height - 1;
-    bottom_border(buf, x, footer_y, area.width, theme, "esc back · q quit");
-
-    let max_y = footer_y; // body rows must stay strictly above this
-    let mut y = area.y + 2; // one blank line under the top border
-
-    // ── TODAY ──────────────────────────────────────────────────────────────
-    y = section(buf, x, y, max_y, "TODAY", accent);
-    y = kv_row(
-        buf,
-        x,
-        y,
-        max_y,
+    lines.push(section_line("TODAY", accent));
+    lines.push(kv_line(
         ("work", fmt_dur(data.today.busy_secs)),
         ("turns", data.today.turns.to_string()),
-    );
-    y = kv_row(
-        buf,
-        x,
-        y,
-        max_y,
+    ));
+    lines.push(kv_line(
         ("input", format!("{} ×", data.today.interventions)),
         ("avg wait", fmt_dur(data.today.avg_wait_secs.round() as i64)),
-    );
-    y = blank(y);
+    ));
+    lines.push(Vec::new());
 
-    // ── THIS WEEK ────────────────────────────────────────────────────────────
-    y = section(buf, x, y, max_y, "THIS WEEK (7d)", accent);
-    y = kv_row(
-        buf,
-        x,
-        y,
-        max_y,
+    lines.push(section_line("THIS WEEK (7d)", accent));
+    lines.push(kv_line(
         ("work", fmt_dur(data.week.busy_secs)),
         ("turns", data.week.turns.to_string()),
-    );
-    y = kv_row(
-        buf,
-        x,
-        y,
-        max_y,
+    ));
+    lines.push(kv_line(
         ("input", format!("{} ×", data.week.interventions)),
         ("avg wait", fmt_dur(data.week.avg_wait_secs.round() as i64)),
-    );
-    y = blank(y);
+    ));
+    lines.push(Vec::new());
 
-    // ── BY PROJECT ───────────────────────────────────────────────────────────
     if !data.projects.is_empty() {
-        y = section(buf, x, y, max_y, "BY PROJECT (7d)", accent);
+        lines.push(section_line("BY PROJECT (7d)", accent));
         let max = data.projects.iter().map(|p| p.busy_secs).max().unwrap_or(1);
         for p in &data.projects {
-            if y >= max_y {
-                break;
-            }
-            y = labeled_bar(buf, x, y, w, &p.name, p.busy_secs, max);
+            lines.push(bar_line(&p.name, p.busy_secs, max, w));
         }
-        y = blank(y);
+        lines.push(Vec::new());
     }
 
-    // ── DAILY TREND ──────────────────────────────────────────────────────────
     if !data.daily.is_empty() {
-        y = section(buf, x, y, max_y, "DAILY (7d)", accent);
+        lines.push(section_line("DAILY (7d)", accent));
         let max = data.daily.iter().map(|d| d.busy_secs).max().unwrap_or(1);
         for d in &data.daily {
-            if y >= max_y {
-                break;
-            }
             // Show MM-DD (drop the leading "YYYY-").
             let label = d.day.get(5..).unwrap_or(d.day.as_str());
-            y = labeled_bar(buf, x, y, w, label, d.busy_secs, max);
+            lines.push(bar_line(label, d.busy_secs, max, w));
         }
+        lines.push(Vec::new());
     }
 
-    // If there is no data at all, say so plainly.
     if data.today.turns == 0
         && data.week.turns == 0
         && data.projects.is_empty()
         && data.daily.is_empty()
-        && area.y + 2 < max_y
     {
-        buf.set_string(
-            x + 2,
-            area.y + 2,
-            "no history yet — stats appear once agents complete turns",
-            Style::default().fg(Color::DarkGray),
-        );
+        lines.push(vec![Seg {
+            col: 2,
+            text: "no history yet — stats appear once agents complete turns".to_string(),
+            style: Style::default().fg(Color::DarkGray),
+        }]);
     }
+
+    lines
 }
 
-// ── Rendering helpers ─────────────────────────────────────────────────────────
-
-fn blank(y: u16) -> u16 {
-    y + 1
+fn section_line(title: &str, accent: Color) -> Line {
+    vec![Seg {
+        col: 2,
+        text: title.to_string(),
+        style: Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    }]
 }
 
-/// A section header line in accent bold; returns the next y.
-fn section(buf: &mut Buffer, x: u16, y: u16, max_y: u16, title: &str, accent: Color) -> u16 {
-    if y < max_y {
-        buf.set_string(
-            x + 2,
-            y,
-            title,
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        );
-    }
-    y + 1
+fn kv_line(left: (&str, String), right: (&str, String)) -> Line {
+    let mut segs = Vec::new();
+    push_kv(&mut segs, 4, left.0, &left.1);
+    push_kv(&mut segs, 24, right.0, &right.1);
+    segs
 }
 
-/// Two `label value` pairs on one line at fixed columns; returns the next y.
-fn kv_row(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    max_y: u16,
-    left: (&str, String),
-    right: (&str, String),
-) -> u16 {
-    if y < max_y {
-        put_kv(buf, x + 4, y, left.0, &left.1);
-        put_kv(buf, x + 24, y, right.0, &right.1);
-    }
-    y + 1
+fn push_kv(segs: &mut Line, col: u16, label: &str, value: &str) {
+    segs.push(Seg {
+        col,
+        text: label.to_string(),
+        style: Style::default().fg(Color::DarkGray),
+    });
+    let vcol = col + UnicodeWidthStr::width(label) as u16 + 2;
+    segs.push(Seg {
+        col: vcol,
+        text: value.to_string(),
+        style: Style::default().fg(Color::Reset),
+    });
 }
 
-/// Render `label` (dim) followed by `value` (default fg) at column `cx`.
-fn put_kv(buf: &mut Buffer, cx: u16, y: u16, label: &str, value: &str) {
-    buf.set_string(cx, y, label, Style::default().fg(Color::DarkGray));
-    let vx = cx + UnicodeWidthStr::width(label) as u16 + 2;
-    buf.set_string(vx, y, value, Style::default().fg(Color::Reset));
-}
-
-/// `  <label>  <bar>  <dur>` row, scaling the bar to the available width.
-fn labeled_bar(buf: &mut Buffer, x: u16, y: u16, w: usize, label: &str, value: i64, max: i64) -> u16 {
+fn bar_line(label: &str, value: i64, max: i64, w: usize) -> Line {
     let label_w = 16usize;
     let dur_w = 9usize;
     let bar_w = w
@@ -221,17 +192,69 @@ fn labeled_bar(buf: &mut Buffer, x: u16, y: u16, w: usize, label: &str, value: i
         .clamp(0, 24);
 
     let name = pad_to_width(&truncate_to_width(label, label_w), label_w);
-    buf.set_string(x + 4, y, &name, Style::default().fg(Color::Reset));
+    let mut segs = vec![Seg {
+        col: 4,
+        text: name,
+        style: Style::default().fg(Color::Reset),
+    }];
 
-    let bar_x = x + 4 + label_w as u16 + 1;
+    let bar_col = 4 + label_w as u16 + 1;
     let b = bar(value, max, bar_w);
     if !b.is_empty() {
-        buf.set_string(bar_x, y, &b, Style::default().fg(theme::COLOR_WORKING));
+        segs.push(Seg {
+            col: bar_col,
+            text: b,
+            style: Style::default().fg(theme::COLOR_WORKING),
+        });
     }
 
-    let dur_x = bar_x + bar_w as u16 + 1;
-    buf.set_string(dur_x, y, fmt_dur(value), Style::default().fg(Color::DarkGray));
-    y + 1
+    let dur_col = bar_col + bar_w as u16 + 1;
+    segs.push(Seg {
+        col: dur_col,
+        text: fmt_dur(value),
+        style: Style::default().fg(Color::DarkGray),
+    });
+    segs
+}
+
+// ── Render ───────────────────────────────────────────────────────────────────
+
+/// Render the full-screen, scrollable stats page into `buf`. `scroll` is the
+/// number of logical lines hidden above the viewport (clamped here defensively).
+pub fn render_stats(buf: &mut Buffer, area: Rect, data: &StatsData, theme: &Theme, scroll: usize) {
+    if area.height < 2 || area.width < 10 {
+        return;
+    }
+    let x = area.x;
+    let accent = theme::COLOR_ACCENT;
+
+    let lines = build_lines(data, area.width as usize);
+    let body_h = area.height.saturating_sub(2) as usize; // between top & bottom borders
+    let max_scroll = lines.len().saturating_sub(body_h);
+    let scroll = scroll.min(max_scroll);
+
+    top_border(buf, x, area.y, area.width, theme, accent, "roost · stats");
+    let footer_y = area.y + area.height - 1;
+    bottom_border(buf, x, footer_y, area.width, theme, "↑/↓ scroll · esc back · q quit");
+
+    let body_y = area.y + 1;
+    for (i, line) in lines.iter().skip(scroll).take(body_h).enumerate() {
+        let y = body_y + i as u16;
+        for seg in line {
+            buf.set_string(x + seg.col, y, &seg.text, seg.style);
+        }
+    }
+
+    // Scroll affordances so content is never silently cut off.
+    let dim = Style::default().fg(theme.dim);
+    if area.width >= 3 {
+        if scroll > 0 {
+            buf.set_string(x + area.width - 2, area.y, "▲", dim);
+        }
+        if scroll + body_h < lines.len() {
+            buf.set_string(x + area.width - 2, footer_y, "▼", dim);
+        }
+    }
 }
 
 fn top_border(buf: &mut Buffer, x: u16, y: u16, width: u16, theme: &Theme, accent: Color, title: &str) {
@@ -278,6 +301,53 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    fn render_to_string(data: &StatsData, w: u16, h: u16, scroll: usize) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let theme = Theme::classic();
+        term.draw(|f| {
+            let area = f.area();
+            render_stats(f.buffer_mut(), area, data, &theme, scroll);
+        })
+        .unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect()
+    }
+
+    fn long_data() -> StatsData {
+        StatsData {
+            today: WindowStats {
+                interventions: 3,
+                avg_wait_secs: 90.0,
+                turns: 10,
+                busy_secs: 4 * 3600 + 12 * 60,
+            },
+            week: WindowStats {
+                interventions: 20,
+                avg_wait_secs: 75.0,
+                turns: 100,
+                busy_secs: 18 * 3600,
+            },
+            daily: (1..=7)
+                .map(|d| DailyWork {
+                    day: format!("2026-06-0{d}"),
+                    busy_secs: (d as i64) * 600,
+                    turns: 1,
+                })
+                .collect(),
+            projects: (0..6)
+                .map(|i| ProjectWork {
+                    name: format!("proj-{i}"),
+                    busy_secs: (i as i64 + 1) * 600,
+                    turns: 1,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn fmt_dur_cases() {
         assert_eq!(fmt_dur(0), "0s");
@@ -294,64 +364,40 @@ mod tests {
         assert_eq!(bar(0, 100, 10), "");
         assert_eq!(bar(100, 100, 10).chars().count(), 10);
         assert_eq!(bar(50, 100, 10).chars().count(), 5);
-        // Tiny non-zero value still shows at least one cell.
         assert_eq!(bar(1, 1000, 10).chars().count(), 1);
     }
 
     #[test]
-    fn render_empty_stats_does_not_panic_and_says_no_history() {
-        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        let theme = Theme::classic();
-        let data = StatsData::default();
-        term.draw(|f| {
-            let area = f.area();
-            render_stats(f.buffer_mut(), area, &data, &theme)
-        })
-        .unwrap();
-        let buf = term.backend().buffer().clone();
-        let content: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+    fn render_empty_stats_says_no_history() {
+        let content = render_to_string(&StatsData::default(), 80, 24, 0);
         assert!(content.contains("roost · stats"), "title should render");
         assert!(content.contains("no history yet"), "empty hint should show");
     }
 
     #[test]
     fn render_populated_stats_shows_sections() {
-        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        let theme = Theme::classic();
-        let data = StatsData {
-            today: WindowStats {
-                interventions: 3,
-                avg_wait_secs: 90.0,
-                turns: 10,
-                busy_secs: 4 * 3600 + 12 * 60,
-            },
-            week: WindowStats {
-                interventions: 20,
-                avg_wait_secs: 75.0,
-                turns: 100,
-                busy_secs: 18 * 3600,
-            },
-            daily: vec![DailyWork {
-                day: "2026-06-02".to_string(),
-                busy_secs: 4 * 3600,
-                turns: 10,
-            }],
-            projects: vec![ProjectWork {
-                name: "roost".to_string(),
-                busy_secs: 2 * 3600,
-                turns: 8,
-            }],
-        };
-        term.draw(|f| {
-            let area = f.area();
-            render_stats(f.buffer_mut(), area, &data, &theme)
-        })
-        .unwrap();
-        let buf = term.backend().buffer().clone();
-        let content: String = buf.content().iter().map(|c| c.symbol().to_string()).collect();
+        let content = render_to_string(&long_data(), 80, 30, 0);
         assert!(content.contains("TODAY"));
         assert!(content.contains("BY PROJECT"));
-        assert!(content.contains("roost"));
         assert!(content.contains("4h 12m"), "today work time should render");
+    }
+
+    #[test]
+    fn long_content_scrolls_and_shows_indicators() {
+        let data = long_data();
+        let total = line_count(&data);
+        assert!(total > 8, "expected long content, got {total}");
+
+        // Short terminal (height 10 → body 8): top visible, bottom hidden, ▼ shown.
+        let top = render_to_string(&data, 80, 10, 0);
+        assert!(top.contains("TODAY"), "top section visible at scroll 0");
+        assert!(top.contains('▼'), "more-below indicator at scroll 0");
+        assert!(!top.contains("06-07"), "last day hidden at scroll 0");
+
+        // Scroll past the end (clamped): reveals the bottom, hides the top, ▲ shown.
+        let bottom = render_to_string(&data, 80, 10, 1000);
+        assert!(bottom.contains("06-07"), "scrolling reveals the last day");
+        assert!(bottom.contains('▲'), "more-above indicator after scrolling");
+        assert!(!bottom.contains("TODAY"), "top section scrolled away");
     }
 }
