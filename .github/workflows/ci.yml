@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Compile everything (incl. integration tests) so platform-specific
+      # branches like the Linux notify-send path are type-checked on Linux.
+      - name: Build
+        run: cargo build --locked --all-targets
+      # Run library unit tests only. The integration tests under tests/ spin up
+      # a real daemon; the unit tests cover the pure logic and stay fast/stable
+      # on headless CI runners.
+      - name: Test (lib)
+        run: cargo test --locked --lib
