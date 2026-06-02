@@ -19,7 +19,7 @@ Watch all your AI coding agents from one terminal panel.
   IDLE  1
   ≈ DeepSeek  api-server     ✓ done                                Warp      3m
 
-  ↑/↓ j/k select · enter peek · o jump · s stats · q quit
+  ↑/↓ j/k select · enter peek · o jump · s stats · c settings · q quit
 ```
 
 roost does **not** start, proxy, or control agents. It works entirely through the hook callbacks each agent fires — installing them is a one-time `roost setup`.
@@ -37,6 +37,7 @@ roost does **not** start, proxy, or control agents. It works entirely through th
 - **Peek panel** — press `enter` for a detail view: path, status, current action, and a recent-event timeline with frozen per-step durations.
 - **Jump to the agent** — press `o` to focus the agent's terminal window or editor (best-effort, host-dependent).
 - **History & stats** — press `s` for daily work time, a per-project breakdown, and how often agents waited on you. Stored locally in `~/.roost/history.db` (bundled SQLite — nothing to install).
+- **Desktop notifications (macOS)** — the daemon fires a notification + sound when an agent needs you (clarify / approve) or finishes (done), so you get pulled back even when the panel isn't focused — or isn't open. Per-stage banner/sound toggles live in `~/.roost/settings.json` or an in-app settings page (`c`).
 - **Passive & safe** — read-only, hook-driven, never blocks the agent, and `setup` merges into existing config without clobbering your other hooks.
 - **Responsive layout** — adapts columns to terminal width, CJK-aware.
 - **Single static binary** — no async runtime; the background daemon keeps state even when the panel is closed.
@@ -93,7 +94,7 @@ for you — so you can also just run `roost` and accept the prompt.
 
 ### Keys
 
-`↑`/`↓` or `j`/`k` select · `enter` peek · `o` jump to agent · `s` stats · `q` / `esc` quit
+`↑`/`↓` or `j`/`k` select · `enter` peek · `o` jump to agent · `s` stats · `c` settings · `q` / `esc` quit
 
 ---
 
@@ -144,6 +145,36 @@ Grouped in priority order: **NEEDS INPUT** (Approval, then Question) → **WORKI
 | Idle | `○` | slate | `SessionStart` before the first prompt, or after an idle notification |
 
 A session is removed (not shown as "disconnected") when `SessionEnd` fires or when the agent process dies and liveness probing detects it.
+
+---
+
+## Notifications (macOS)
+
+When a session crosses **into** a state that wants your attention, the background daemon fires a desktop notification with a sound — so you get pulled back even when the panel isn't focused, or isn't open. Notifications are fired by the daemon (not the TUI), once per transition into the stage.
+
+| Stage | Trigger state | Default sound |
+|---|---|---|
+| `clarify` | Question — a clarify card / waiting for your input | Submarine |
+| `approve` | Approval — permission for a risky action | Bottle |
+| `done` | Done — the agent finished a turn | Ping |
+
+The banner **title** is `roost`; the **body** shows `<agent> · <project> — <what it's waiting on>` (or a completion note for `done`). Each agent family is labelled (Claude Code / Codex / DeepSeek / Cursor) so you can tell who needs you.
+
+**Configurable per stage** — every stage has independent `banner` (popup) and `sound` switches, stored in `~/.roost/settings.json`:
+
+```json
+{
+  "notify": {
+    "clarify": { "banner": true, "sound": true },
+    "approve": { "banner": true, "sound": true },
+    "done":    { "banner": true, "sound": true }
+  }
+}
+```
+
+Edit the file directly, or press **`c`** in the panel to open a scrollable settings page and toggle each switch — changes are saved immediately and take effect on the next notification. A missing file or field falls back to all-on (fail-open).
+
+macOS only: banners use `osascript`, sounds use `afplay` — both built into macOS, nothing to install. On other platforms notifications are a silent no-op (never an error).
 
 ---
 

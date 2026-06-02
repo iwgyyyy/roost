@@ -19,7 +19,7 @@
   IDLE  1
   ≈ DeepSeek  api-server     ✓ done                               Warp      3m
 
-  ↑/↓ j/k select · enter peek · o jump · s stats · q quit
+  ↑/↓ j/k select · enter peek · o jump · s stats · c settings · q quit
 ```
 
 roost **不会**启动、代理或控制任何 agent。它完全依靠各 agent 自己触发的 hook 回调工作——只需一次 `roost setup` 安装这些 hook。
@@ -37,6 +37,7 @@ roost **不会**启动、代理或控制任何 agent。它完全依靠各 agent 
 - **详情面板（peek）**——按 `enter` 查看详情：路径、状态、当前动作，以及一条带「冻结耗时」的最近事件时间线。
 - **一键跳转**——按 `o` 聚焦到该 agent 所在的终端窗口或编辑器（尽力而为，取决于宿主）。
 - **历史与统计**——按 `s` 查看每日工作时长、按项目的耗时分布,以及 agent 等你介入的频次。数据存在本地 `~/.roost/history.db`（内置 SQLite,无需安装任何东西）。
+- **桌面通知（macOS）**——agent 需要你（clarify / approve）或完成（done）时，后台 daemon 弹出系统通知 + 声音，即使面板没聚焦、甚至没打开也能把你叫回来。每个阶段的弹窗/声音开关存在 `~/.roost/settings.json`，也可在面板内设置页（`c`）调整。
 - **被动且安全**——只读、hook 驱动、绝不阻塞 agent；`setup` 是合并写入现有配置，不会覆盖你其它的 hook。
 - **自适应布局**——按终端宽度调整列，正确处理 CJK 宽字符。
 - **单一静态二进制**——无 async 运行时；后台 daemon 在面板关闭后仍保留状态。
@@ -91,7 +92,7 @@ roost
 
 ### 按键
 
-`↑`/`↓` 或 `j`/`k` 选择 · `enter` 详情 · `o` 跳转到 agent · `s` 统计 · `q` / `esc` 退出
+`↑`/`↓` 或 `j`/`k` 选择 · `enter` 详情 · `o` 跳转到 agent · `s` 统计 · `c` 设置 · `q` / `esc` 退出
 
 ---
 
@@ -142,6 +143,36 @@ agent 触发 hook
 | Idle | `○` | 石板灰 | 首条 prompt 之前的 `SessionStart`，或收到空闲通知后 |
 
 当 `SessionEnd` 触发、或 agent 进程退出被存活探测发现时，会话会被**移除**（而不是显示成「已断开」）。
+
+---
+
+## 通知（macOS）
+
+当某个会话**进入**需要你关注的状态时，后台 daemon 会弹出系统通知并发声——即使面板没聚焦、甚至没打开，也能把你叫回来。通知由 daemon（不是 TUI）触发，每次进入对应阶段只响一次。
+
+| 阶段 | 触发状态 | 默认声音 |
+|---|---|---|
+| `clarify` | Question——clarify 卡片 / 等待你输入 | Submarine |
+| `approve` | Approval——批准危险操作 | Bottle |
+| `done` | Done——agent 完成一个 turn | Ping |
+
+通知**标题**固定为 `roost`；**内容**显示 `<agent> · <项目> — <在等什么>`（done 则显示完成提示）。每个 agent 家族都有标注（Claude Code / Codex / DeepSeek / Cursor），一眼看清是谁在等你。
+
+**每个阶段可独立配置**——三个阶段各有独立的 `banner`（弹窗）和 `sound`（声音）开关，存在 `~/.roost/settings.json`：
+
+```json
+{
+  "notify": {
+    "clarify": { "banner": true, "sound": true },
+    "approve": { "banner": true, "sound": true },
+    "done":    { "banner": true, "sound": true }
+  }
+}
+```
+
+可以直接编辑该文件，或在面板里按 **`c`** 打开可滚动的设置页逐个开关——切换即保存，下次通知生效。文件或字段缺失时回退为全部开启（fail-open）。
+
+仅 macOS：弹窗用 `osascript`，声音用 `afplay`，都是 macOS 自带，无需安装任何东西。其它平台为静默 no-op（绝不报错）。
 
 ---
 
