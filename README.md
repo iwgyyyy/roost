@@ -37,7 +37,7 @@ roost does **not** start, proxy, or control agents. It works entirely through th
 - **Peek panel** — press `enter` for a detail view: path, status, current action, and a recent-event timeline with frozen per-step durations.
 - **Jump to the agent** — press `o` to focus the agent's terminal window or editor (best-effort, host-dependent).
 - **History & stats** — press `s` for daily work time, a per-project breakdown, and how often agents waited on you. Stored locally in `~/.roost/history.db` (bundled SQLite — nothing to install).
-- **Desktop notifications (macOS)** — the daemon fires a notification + sound when an agent needs you (clarify / approve) or finishes (done), so you get pulled back even when the panel isn't focused — or isn't open. Per-stage banner/sound toggles live in `~/.roost/settings.json` or an in-app settings page (`c`).
+- **Desktop notifications (macOS & Linux)** — the daemon fires a notification + sound when an agent needs you (clarify / approve) or finishes (done), so you get pulled back even when the panel isn't focused — or isn't open. Per-stage banner/sound toggles live in `~/.roost/settings.json` or an in-app settings page (`c`).
 - **Passive & safe** — read-only, hook-driven, never blocks the agent, and `setup` merges into existing config without clobbering your other hooks.
 - **Responsive layout** — adapts columns to terminal width, CJK-aware.
 - **Single static binary** — no async runtime; the background daemon keeps state even when the panel is closed.
@@ -148,7 +148,7 @@ A session is removed (not shown as "disconnected") when `SessionEnd` fires or wh
 
 ---
 
-## Notifications (macOS)
+## Notifications (macOS & Linux)
 
 When a session crosses **into** a state that wants your attention, the background daemon fires a desktop notification with a sound — so you get pulled back even when the panel isn't focused, or isn't open. Notifications are fired by the daemon (not the TUI), once per transition into the stage.
 
@@ -174,7 +174,7 @@ The banner **title** is `roost`; the **body** shows `<agent> · <project> — <w
 
 Edit the file directly, or press **`c`** in the panel to open a scrollable settings page and toggle each switch — changes are saved immediately and take effect on the next notification. A missing file or field falls back to all-on (fail-open).
 
-macOS only: banners use `osascript`, sounds use `afplay` — both built into macOS, nothing to install. On other platforms notifications are a silent no-op (never an error).
+**Platforms.** macOS uses `osascript` for banners and `afplay` for sounds — both built in, nothing to install. Linux uses `notify-send` (from `libnotify-bin` / `libnotify`); the per-stage sound rides along as a freedesktop `sound-name` hint (`message-new-instant` / `dialog-warning` / `complete`), falling back to `canberra-gtk-play` / `paplay` when only the sound is enabled. If a tool is missing — or there's no desktop session (headless / SSH) — notifications degrade to a silent no-op, never an error. `roost setup` points you at the package to install when `notify-send` is absent. Other platforms are always a no-op.
 
 ---
 

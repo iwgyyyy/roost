@@ -4,9 +4,10 @@
 //! (`sound_for`), notification text generation (`notification_text`), sound-
 //! file path lookup (`sound_file`), and a best-effort macOS notifier (`fire`).
 //!
-//! All pure functions are unit-tested below. `fire` is macOS-only; on other
-//! platforms it is a no-op. No panics, no blocking — spawn failures are silently
-//! ignored (fail-open).
+//! All pure functions are unit-tested below. `fire` fires on macOS (via
+//! `osascript`/`afplay`) and Linux (via `notify-send`, falling back to a sound
+//! player); on every other platform it is a no-op. No panics, no blocking —
+//! missing tools and spawn failures are silently ignored (fail-open).
 
 use std::path::PathBuf;
 
@@ -85,6 +86,50 @@ pub fn sound_file(name: &str) -> PathBuf {
     PathBuf::from(format!("/System/Library/Sounds/{name}.aiff"))
 }
 
+/// Maps an actionable agent state to a freedesktop sound-theme event name,
+/// used on Linux both as the `notify-send` `sound-name` hint and as the
+/// `canberra-gtk-play -i` event id.
+///
+/// - `Question`  → `"message-new-instant"`
+/// - `Approval`  → `"dialog-warning"`
+/// - `Done`      → `"complete"`
+/// - everything else → `None`
+///
+/// These are standard names from `sound-theme-freedesktop`; an event the
+/// active theme doesn't provide simply plays nothing (graceful).
+pub fn linux_sound_event(state: AgentState) -> Option<&'static str> {
+    match state {
+        AgentState::Question => Some("message-new-instant"),
+        AgentState::Approval => Some("dialog-warning"),
+        AgentState::Done => Some("complete"),
+        _ => None,
+    }
+}
+
+/// Maps an actionable agent state to a `notify-send` urgency level.
+///
+/// - `Approval`  → `"critical"` (KDE/GNOME keep critical banners until dismissed)
+/// - `Done`      → `"low"`
+/// - everything else → `"normal"`
+pub fn linux_urgency(state: AgentState) -> &'static str {
+    match state {
+        AgentState::Approval => "critical",
+        AgentState::Done => "low",
+        _ => "normal",
+    }
+}
+
+/// Returns the path to a freedesktop sound-theme file for a sound event,
+/// used as the `paplay` fallback when `canberra-gtk-play` is unavailable.
+///
+/// e.g. `linux_sound_file("complete")` →
+/// `/usr/share/sounds/freedesktop/stereo/complete.oga`
+pub fn linux_sound_file(event: &str) -> PathBuf {
+    PathBuf::from(format!(
+        "/usr/share/sounds/freedesktop/stereo/{event}.oga"
+    ))
+}
+
 /// Wraps a string as an AppleScript string literal, escaping `\`, `"`, `\n`,
 /// and `\r`. AppleScript string literals cannot contain bare newlines or
 /// carriage returns — they cause `osascript` to silently fail.
@@ -148,8 +193,77 @@ pub fn fire(
     }
 }
 
-/// Non-macOS no-op.
-#[cfg(not(target_os = "macos"))]
+/// Fire a best-effort Linux desktop notification and/or sound.
+///
+/// - `banner`: spawn `notify-send` to display a notification. When `sound` is
+///   also true, the sound rides along as a freedesktop `sound-name` hint, so
+///   the notification daemon plays it (one spawn).
+/// - `sound` without `banner`: there is no banner to carry the hint, so play
+///   the sound directly — prefer `canberra-gtk-play -i <event>`, fall back to
+///   `paplay <theme.oga>` if that file exists.
+///
+/// All spawns are detached (stdin/stdout/stderr → null, no `.wait()`). Missing
+/// tools (`notify-send`/`canberra-gtk-play`/`paplay` not installed) and other
+/// spawn failures are silently ignored. Needs a desktop session — headless /
+/// pure-SSH boxes have no notification daemon, so this no-ops there too.
+#[cfg(target_os = "linux")]
+pub fn fire(
+    family: &AgentFamily,
+    name: &str,
+    activity: Option<&str>,
+    state: AgentState,
+    banner: bool,
+    sound: bool,
+) {
+    use std::process::{Command, Stdio};
+
+    let (title, body) = notification_text(family, name, activity, state);
+
+    if banner {
+        let mut cmd = Command::new("notify-send");
+        cmd.arg("-a")
+            .arg("roost")
+            .arg("-u")
+            .arg(linux_urgency(state));
+        if sound && let Some(event) = linux_sound_event(state) {
+            cmd.arg("--hint").arg(format!("string:sound-name:{event}"));
+        }
+        let _ = cmd
+            .arg(&title)
+            .arg(&body)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    } else if sound && let Some(event) = linux_sound_event(state) {
+        // Sound but no banner: no notification to carry the hint, so play it
+        // directly. `spawn()` returns Err only when the binary is missing, so
+        // `is_ok()` here means "canberra-gtk-play is installed".
+        let played = Command::new("canberra-gtk-play")
+            .arg("-i")
+            .arg(event)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok();
+        if !played {
+            let path = linux_sound_file(event);
+            if path.exists() {
+                let _ = Command::new("paplay")
+                    .arg(&path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            }
+        }
+    }
+}
+
+/// No-op on platforms without a notification backend (everything except macOS
+/// and Linux).
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn fire(
     _family: &AgentFamily,
     _name: &str,
@@ -412,5 +526,66 @@ mod tests {
     fn sound_file_ping() {
         let p = sound_file("Ping");
         assert_eq!(p, PathBuf::from("/System/Library/Sounds/Ping.aiff"));
+    }
+
+    // ── linux_sound_event ─────────────────────────────────────────────────────
+
+    #[test]
+    fn linux_sound_event_question() {
+        assert_eq!(
+            linux_sound_event(AgentState::Question),
+            Some("message-new-instant")
+        );
+    }
+
+    #[test]
+    fn linux_sound_event_approval() {
+        assert_eq!(
+            linux_sound_event(AgentState::Approval),
+            Some("dialog-warning")
+        );
+    }
+
+    #[test]
+    fn linux_sound_event_done() {
+        assert_eq!(linux_sound_event(AgentState::Done), Some("complete"));
+    }
+
+    #[test]
+    fn linux_sound_event_working_is_none() {
+        assert_eq!(linux_sound_event(AgentState::Working), None);
+    }
+
+    #[test]
+    fn linux_sound_event_idle_is_none() {
+        assert_eq!(linux_sound_event(AgentState::Idle), None);
+    }
+
+    // ── linux_urgency ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn linux_urgency_approval_is_critical() {
+        assert_eq!(linux_urgency(AgentState::Approval), "critical");
+    }
+
+    #[test]
+    fn linux_urgency_done_is_low() {
+        assert_eq!(linux_urgency(AgentState::Done), "low");
+    }
+
+    #[test]
+    fn linux_urgency_question_is_normal() {
+        assert_eq!(linux_urgency(AgentState::Question), "normal");
+    }
+
+    // ── linux_sound_file ──────────────────────────────────────────────────────
+
+    #[test]
+    fn linux_sound_file_returns_freedesktop_path() {
+        let p = linux_sound_file("complete");
+        assert_eq!(
+            p,
+            PathBuf::from("/usr/share/sounds/freedesktop/stereo/complete.oga")
+        );
     }
 }

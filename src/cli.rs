@@ -124,7 +124,31 @@ fn install_hooks() -> Result<()> {
         }
         Err(e) => eprintln!("Warning: Cursor setup failed: {e}"),
     }
+
+    #[cfg(target_os = "linux")]
+    maybe_hint_notify_send();
+
     Ok(())
+}
+
+/// On Linux, desktop notifications shell out to `notify-send` (from the
+/// `libnotify-bin` / `libnotify` package). If it isn't on `PATH`, point the
+/// user at it so they can enable popups; if it's already there, stay silent —
+/// notifications work out of the box.
+#[cfg(target_os = "linux")]
+fn maybe_hint_notify_send() {
+    use std::env;
+
+    let found = env::var_os("PATH").is_some_and(|paths| {
+        env::split_paths(&paths).any(|dir| dir.join("notify-send").is_file())
+    });
+    if !found {
+        println!();
+        println!("Tip: install `notify-send` to enable desktop notifications:");
+        println!("  Debian/Ubuntu: sudo apt install libnotify-bin");
+        println!("  Fedora:        sudo dnf install libnotify");
+        println!("  Arch:          sudo pacman -S libnotify");
+    }
 }
 
 /// On first run (TUI), if no roost hooks are installed yet, offer to install
