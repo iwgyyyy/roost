@@ -19,7 +19,7 @@
   IDLE  1
   ≈ DeepSeek  api-server     ✓ done                               Warp      3m
 
-  ↑/↓ j/k select · enter peek · o jump · q quit
+  ↑/↓ j/k select · enter peek · o jump · s stats · q quit
 ```
 
 roost **不会**启动、代理或控制任何 agent。它完全依靠各 agent 自己触发的 hook 回调工作——只需一次 `roost setup` 安装这些 hook。
@@ -36,6 +36,7 @@ roost **不会**启动、代理或控制任何 agent。它完全依靠各 agent 
 - **累计忙碌计时**——每个会话的累计活跃时长；turn 结束时冻结，下次开始时接着计。
 - **详情面板（peek）**——按 `enter` 查看详情：路径、状态、当前动作，以及一条带「冻结耗时」的最近事件时间线。
 - **一键跳转**——按 `o` 聚焦到该 agent 所在的终端窗口或编辑器（尽力而为，取决于宿主）。
+- **历史与统计**——按 `s` 查看每日工作时长、按项目的耗时分布,以及 agent 等你介入的频次。数据存在本地 `~/.roost/history.db`（内置 SQLite,无需安装任何东西）。
 - **被动且安全**——只读、hook 驱动、绝不阻塞 agent；`setup` 是合并写入现有配置，不会覆盖你其它的 hook。
 - **自适应布局**——按终端宽度调整列，正确处理 CJK 宽字符。
 - **单一静态二进制**——无 async 运行时；后台 daemon 在面板关闭后仍保留状态。
@@ -90,7 +91,7 @@ roost
 
 ### 按键
 
-`↑`/`↓` 或 `j`/`k` 选择 · `enter` 详情 · `o` 跳转到 agent · `q` / `esc` 退出
+`↑`/`↓` 或 `j`/`k` 选择 · `enter` 详情 · `o` 跳转到 agent · `s` 统计 · `q` / `esc` 退出
 
 ---
 

@@ -1,4 +1,5 @@
 pub mod daemon;
+pub mod history;
 pub mod hook;
 pub mod jump;
 pub mod list;

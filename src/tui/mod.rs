@@ -9,6 +9,7 @@ pub mod client;
 pub mod layout;
 pub mod peek;
 pub mod render;
+pub mod stats;
 pub mod theme;
 pub mod viewmodel;
 
@@ -23,6 +24,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
+use crate::history;
 use crate::jump::platform::RealExecutor;
 use crate::jump::{JumpOutcome, jump};
 use crate::protocol::SessionDetail;
@@ -100,6 +102,13 @@ pub fn run_tui() -> Result<()> {
     // Number of recent-event rows scrolled past in the peek panel (0 = newest).
     let mut peek_scroll: usize = 0;
 
+    // Stats page state. A persistent read-only connection (opened lazily when
+    // the page is first shown) is reused across refreshes to avoid reopening
+    // the DB on every tick.
+    let mut stats_open = false;
+    let mut stats_conn: Option<rusqlite::Connection> = None;
+    let mut stats_data: Option<stats::StatsData> = None;
+
     // Jump status: message shown in footer + timestamp for auto-clear
     let mut jump_status: Option<String> = None;
     let mut jump_status_at: Option<Instant> = None;
@@ -149,6 +158,12 @@ pub fn run_tui() -> Result<()> {
                         peek_detail = None;
                     }
                 }
+            }
+
+            // Keep the stats page live on the same cadence (reuse the read-only
+            // connection; recomputing the aggregates is cheap).
+            if stats_open && let Some(conn) = &stats_conn {
+                stats_data = Some(stats::compute(conn));
             }
         }
 
@@ -239,10 +254,16 @@ pub fn run_tui() -> Result<()> {
         let placement_snap = placement.clone();
         let jump_status_snap = jump_status.as_deref();
         let peek_scroll_snap = peek_scroll;
+        let stats_open_snap = stats_open;
+        let stats_data_snap = stats_data.clone();
         terminal.draw(|frame| {
             let full_area = frame.area();
 
-            if peek_open_snap {
+            if stats_open_snap {
+                // The stats page takes over the whole screen.
+                let data = stats_data_snap.clone().unwrap_or_default();
+                stats::render_stats(frame.buffer_mut(), full_area, &data, &theme);
+            } else if peek_open_snap {
                 match placement_snap {
                     PeekPlacement::Inline => {
                         let (list_area, peek_area) = split_for_inline_peek(full_area);
@@ -310,9 +331,29 @@ pub fn run_tui() -> Result<()> {
                     &groups,
                     &mut selected_id,
                     peek_open,
+                    stats_open,
                 );
                 match action {
                     KeyAction::Quit => break,
+                    KeyAction::ToggleStats => {
+                        if stats_open {
+                            stats_open = false;
+                            stats_data = None;
+                            stats_conn = None;
+                        } else {
+                            // Opening stats supersedes the peek panel.
+                            peek_open = false;
+                            peek_detail = None;
+                            stats_conn = history::open_readonly().ok();
+                            stats_data = stats_conn.as_ref().map(stats::compute);
+                            stats_open = true;
+                        }
+                    }
+                    KeyAction::CloseStats => {
+                        stats_open = false;
+                        stats_data = None;
+                        stats_conn = None;
+                    }
                     KeyAction::TogglePeek => {
                         if peek_open {
                             peek_open = false;
@@ -428,6 +469,10 @@ enum KeyAction {
     ScrollDown,
     /// Trigger terminal jump for current selection (`o` key).
     Jump,
+    /// Toggle the stats page (`s` key).
+    ToggleStats,
+    /// Close the stats page (Esc while it is open).
+    CloseStats,
     /// No special action needed.
     None,
 }
@@ -440,7 +485,17 @@ fn handle_key(
     groups: &[viewmodel::Group],
     selected_id: &mut Option<String>,
     peek_open: bool,
+    stats_open: bool,
 ) -> KeyAction {
+    // When the stats page is open it owns the screen: only quit / close / toggle.
+    if stats_open {
+        return match key.code {
+            KeyCode::Char('q') => KeyAction::Quit,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyAction::Quit,
+            KeyCode::Esc | KeyCode::Char('s') => KeyAction::CloseStats,
+            _ => KeyAction::None,
+        };
+    }
     match key.code {
         KeyCode::Char('q') => return KeyAction::Quit,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -456,6 +511,8 @@ fn handle_key(
         KeyCode::Enter => return KeyAction::TogglePeek,
         // `o` = open / jump to agent's terminal window
         KeyCode::Char('o') => return KeyAction::Jump,
+        // `s` = toggle the stats page (only from the list view).
+        KeyCode::Char('s') if !peek_open => return KeyAction::ToggleStats,
         // Tab / Shift-Tab always switch the selected session, wrapping around.
         KeyCode::Tab => {
             selection.cycle_next(n_rows);

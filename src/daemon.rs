@@ -7,11 +7,31 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
+use crate::history::{ClosedTurn, History};
 use crate::liveness;
 use crate::naming::resolve_name;
 use crate::protocol::{Event, Request, SessionDetail, SessionView};
 use crate::session::AgentSession;
 use crate::sock;
+
+/// Shared, optional history writer. `None` if the DB could not be opened — in
+/// that case statistics are silently disabled and the daemon runs normally
+/// (fail-open: history must never block agents or take down the daemon).
+type SharedHistory = Option<Arc<Mutex<History>>>;
+
+/// Persist closed turns under the history lock, outside the sessions lock.
+/// Errors are swallowed — a failed stats write must never disrupt the daemon.
+fn record_turns(history: &SharedHistory, turns: &[ClosedTurn]) {
+    if turns.is_empty() {
+        return;
+    }
+    if let Some(h) = history {
+        let hist = h.lock().unwrap_or_else(|p| p.into_inner());
+        for t in turns {
+            let _ = hist.record_turn(t);
+        }
+    }
+}
 
 /// Per-session liveness metadata maintained by the daemon (separate from AgentSession
 /// to avoid cluttering the session model).
@@ -200,11 +220,21 @@ pub fn run_daemon_at(path: PathBuf) -> Result<()> {
 
     let state: Arc<Mutex<DaemonState>> = Arc::new(Mutex::new(DaemonState::new()));
 
+    // Open the history DB (fail-open: disable stats but keep running on error).
+    let history: SharedHistory = match History::open() {
+        Ok(h) => Some(Arc::new(Mutex::new(h))),
+        Err(e) => {
+            eprintln!("[roost daemon] history disabled: {e:#}");
+            None
+        }
+    };
+
     // Spawn the liveness (keep-alive) thread.
     {
         let state_clone = Arc::clone(&state);
+        let history_clone = history.clone();
         std::thread::spawn(move || {
-            run_liveness_thread(state_clone);
+            run_liveness_thread(state_clone, history_clone);
         });
     }
 
@@ -214,8 +244,9 @@ pub fn run_daemon_at(path: PathBuf) -> Result<()> {
         match stream {
             Ok(stream) => {
                 let state_clone = Arc::clone(&state);
+                let history_clone = history.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_connection(stream, state_clone) {
+                    if let Err(e) = handle_connection(stream, state_clone, history_clone) {
                         eprintln!("[roost daemon] connection error: {e}");
                     }
                 });
@@ -229,7 +260,11 @@ pub fn run_daemon_at(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn handle_connection(stream: UnixStream, state: Arc<Mutex<DaemonState>>) -> Result<()> {
+fn handle_connection(
+    stream: UnixStream,
+    state: Arc<Mutex<DaemonState>>,
+    history: SharedHistory,
+) -> Result<()> {
     let mut write_stream = stream.try_clone()?;
     let reader = BufReader::new(stream);
 
@@ -267,30 +302,51 @@ fn handle_connection(stream: UnixStream, state: Arc<Mutex<DaemonState>>) -> Resu
                     None
                 };
 
-                let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+                // Collect any turns closed by this event so they can be written
+                // to the history DB *after* the sessions lock is released (DB I/O
+                // must not be held under the hot sessions mutex).
+                let mut closed: Vec<ClosedTurn> = Vec::new();
+                {
+                    let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
 
-                let session_ended = if let Some(session) = st.sessions.get_mut(&session_id) {
-                    session.apply(&event)
-                } else {
-                    // New session: create then apply
-                    let mut session = AgentSession::new(&event);
-                    session.name = resolved_name.unwrap_or_else(|| resolve_name(&cwd));
-                    let ended = session.apply(&event);
-                    st.sessions.insert(session_id.clone(), session);
-                    // Initialise liveness entry.
-                    st.liveness.entry(session_id.clone()).or_default();
-                    ended
-                };
+                    let session_ended = if let Some(session) = st.sessions.get_mut(&session_id) {
+                        let ended = session.apply(&event);
+                        if let Some(t) = session.take_closed_turn() {
+                            closed.push(t);
+                        }
+                        if ended && let Some(t) = session.flush_open_turn() {
+                            closed.push(t);
+                        }
+                        ended
+                    } else {
+                        // New session: create then apply
+                        let mut session = AgentSession::new(&event);
+                        session.name = resolved_name.unwrap_or_else(|| resolve_name(&cwd));
+                        let ended = session.apply(&event);
+                        if let Some(t) = session.take_closed_turn() {
+                            closed.push(t);
+                        }
+                        if ended && let Some(t) = session.flush_open_turn() {
+                            closed.push(t);
+                        }
+                        st.sessions.insert(session_id.clone(), session);
+                        // Initialise liveness entry.
+                        st.liveness.entry(session_id.clone()).or_default();
+                        ended
+                    };
 
-                if session_ended {
-                    st.sessions.remove(&session_id);
-                    st.liveness.remove(&session_id);
-                } else {
-                    // Reset consecutive dead count on any fresh event.
-                    if let Some(meta) = st.liveness.get_mut(&session_id) {
-                        meta.consecutive_dead = 0;
+                    if session_ended {
+                        st.sessions.remove(&session_id);
+                        st.liveness.remove(&session_id);
+                    } else {
+                        // Reset consecutive dead count on any fresh event.
+                        if let Some(meta) = st.liveness.get_mut(&session_id) {
+                            meta.consecutive_dead = 0;
+                        }
                     }
                 }
+
+                record_turns(&history, &closed);
             }
             Request::List => {
                 let views = {
@@ -339,7 +395,7 @@ pub fn pid_is_alive(pid: u32) -> bool {
 
 /// The liveness thread: runs every ~2s, probes each session's pid, calls
 /// `liveness::should_remove` and removes dead sessions.
-fn run_liveness_thread(state: Arc<Mutex<DaemonState>>) {
+fn run_liveness_thread(state: Arc<Mutex<DaemonState>>, history: SharedHistory) {
     loop {
         std::thread::sleep(LIVENESS_INTERVAL);
 
@@ -371,12 +427,23 @@ fn run_liveness_thread(state: Arc<Mutex<DaemonState>>) {
             // the liveness thread can observe them.
             let remove = liveness::should_remove(now, last_activity, new_consecutive, false);
 
-            let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
-            if remove {
-                st.sessions.remove(&id);
-                st.liveness.remove(&id);
-            } else if let Some(meta) = st.liveness.get_mut(&id) {
-                meta.consecutive_dead = new_consecutive;
+            let mut closed: Option<ClosedTurn> = None;
+            {
+                let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+                if remove {
+                    // Flush the in-flight turn (as incomplete) before dropping
+                    // the session so its work isn't lost from history.
+                    if let Some(session) = st.sessions.get_mut(&id) {
+                        closed = session.flush_open_turn();
+                    }
+                    st.sessions.remove(&id);
+                    st.liveness.remove(&id);
+                } else if let Some(meta) = st.liveness.get_mut(&id) {
+                    meta.consecutive_dead = new_consecutive;
+                }
+            }
+            if let Some(t) = closed {
+                record_turns(&history, std::slice::from_ref(&t));
             }
         }
     }

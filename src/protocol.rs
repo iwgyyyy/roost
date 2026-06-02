@@ -86,6 +86,18 @@ impl AgentFamily {
             AgentFamily::Unknown => "agent",
         }
     }
+
+    /// Stable machine identifier (matches the serde `snake_case` representation).
+    /// Used to persist the family in the history database as TEXT.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentFamily::Claude => "claude",
+            AgentFamily::Codex => "codex",
+            AgentFamily::Deepseek => "deepseek",
+            AgentFamily::Cursor => "cursor",
+            AgentFamily::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -13,7 +13,22 @@ fn temp_socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/roost-list-test-{pid}-{n}.sock"))
 }
 
+/// Point ROOST_HOME at a throwaway temp dir so the in-process daemon's history
+/// DB never touches the real `~/.roost`. Set exactly once: `call_once` serializes
+/// every test's `start_daemon`, so the env var is written before any daemon
+/// thread reads it (no data race) and reused by all daemons in this test binary.
+fn ensure_isolated_home() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("roost-test-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // SAFETY: set once, before any daemon thread exists (see fn doc).
+        unsafe { std::env::set_var("ROOST_HOME", &dir) };
+    });
+}
+
 fn start_daemon(path: PathBuf) {
+    ensure_isolated_home();
     std::thread::spawn(move || {
         roost::daemon::run_daemon_at(path).unwrap();
     });

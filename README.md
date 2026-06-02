@@ -19,7 +19,7 @@ Watch all your AI coding agents from one terminal panel.
   IDLE  1
   ≈ DeepSeek  api-server     ✓ done                                Warp      3m
 
-  ↑/↓ j/k select · enter peek · o jump · q quit
+  ↑/↓ j/k select · enter peek · o jump · s stats · q quit
 ```
 
 roost does **not** start, proxy, or control agents. It works entirely through the hook callbacks each agent fires — installing them is a one-time `roost setup`.
@@ -36,6 +36,7 @@ roost does **not** start, proxy, or control agents. It works entirely through th
 - **Cumulative busy timer** — total active time per session; freezes when the turn ends and resumes on the next prompt.
 - **Peek panel** — press `enter` for a detail view: path, status, current action, and a recent-event timeline with frozen per-step durations.
 - **Jump to the agent** — press `o` to focus the agent's terminal window or editor (best-effort, host-dependent).
+- **History & stats** — press `s` for daily work time, a per-project breakdown, and how often agents waited on you. Stored locally in `~/.roost/history.db` (bundled SQLite — nothing to install).
 - **Passive & safe** — read-only, hook-driven, never blocks the agent, and `setup` merges into existing config without clobbering your other hooks.
 - **Responsive layout** — adapts columns to terminal width, CJK-aware.
 - **Single static binary** — no async runtime; the background daemon keeps state even when the panel is closed.
@@ -92,7 +93,7 @@ for you — so you can also just run `roost` and accept the prompt.
 
 ### Keys
 
-`↑`/`↓` or `j`/`k` select · `enter` peek · `o` jump to agent · `q` / `esc` quit
+`↑`/`↓` or `j`/`k` select · `enter` peek · `o` jump to agent · `s` stats · `q` / `esc` quit
 
 ---
 

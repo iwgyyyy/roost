@@ -1,6 +1,7 @@
-use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::collections::{BTreeMap, VecDeque};
+use std::time::{Duration, Instant, SystemTime};
 
+use crate::history::ClosedTurn;
 use crate::protocol::{AgentFamily, Event, EventKind, HookEvent};
 
 pub const MAX_EVENTS: usize = 50;
@@ -152,6 +153,13 @@ pub fn is_active(state: &AgentState) -> bool {
     )
 }
 
+/// Returns true when `state` means the agent is paused waiting on the user
+/// (Approval or Question). Used to attribute per-turn "wait" (response-latency)
+/// time for history statistics.
+pub fn is_waiting(state: &AgentState) -> bool {
+    matches!(state, AgentState::Approval | AgentState::Question)
+}
+
 #[derive(Debug)]
 pub struct AgentSession {
     pub id: String,
@@ -182,6 +190,25 @@ pub struct AgentSession {
     /// stable within-group list order — it only changes when the user sends a
     /// message, unlike `last_activity` which every hook event bumps.
     pub last_prompt_at: Option<Instant>,
+
+    // ── History: per-turn accounting (→ history::ClosedTurn) ─────────────
+    /// Monotonic turn counter within this session (1 = first prompt's turn).
+    pub turn_seq: u32,
+    /// Whether a turn is currently open (between a prompt and its close).
+    pub turn_open: bool,
+    /// Wall-clock start of the current turn (for the DB's `started_at`).
+    pub turn_started_wall: Option<SystemTime>,
+    /// Busy (active) time accumulated within the current turn.
+    pub turn_busy_accum: Duration,
+    /// Wait (approval/question) time accumulated within the current turn.
+    pub turn_wait_accum: Duration,
+    /// Whether the current turn has required the user's input at least once.
+    pub turn_needed_input: bool,
+    /// Tool-name → invocation count within the current turn.
+    pub turn_tool_counts: BTreeMap<String, u32>,
+    /// A turn finished by the just-applied event, awaiting persistence by the
+    /// daemon via `take_closed_turn`.
+    pub pending_closed_turn: Option<ClosedTurn>,
 
     // ── Phase 4: jump locator fields (§14) ───────────────────────────────
     pub host_app: Option<String>,
@@ -217,6 +244,14 @@ impl AgentSession {
             active_accum: Duration::ZERO,
             active_since: None,
             last_prompt_at: None,
+            turn_seq: 0,
+            turn_open: false,
+            turn_started_wall: None,
+            turn_busy_accum: Duration::ZERO,
+            turn_wait_accum: Duration::ZERO,
+            turn_needed_input: false,
+            turn_tool_counts: BTreeMap::new(),
+            pending_closed_turn: None,
             host_app: ev.host_app.clone(),
             host_bundle_id: ev.host_bundle_id.clone(),
             terminal_session_id: ev.terminal_session_id.clone(),
@@ -244,7 +279,23 @@ impl AgentSession {
     /// Apply a hook event to this session. Returns true if the session should be removed.
     pub fn apply(&mut self, ev: &HookEvent) -> bool {
         let now = Instant::now();
+        let now_wall = SystemTime::now();
+        // Attribute the just-elapsed inter-event gap to the state we held during
+        // it, into the currently open turn: busy time while active, wait time
+        // while waiting on the user. This "charge the gap to the prior state"
+        // model keeps per-turn totals correct without tracking segment starts.
+        let prev_activity = self.last_activity;
         self.last_activity = now;
+        let gap = now.saturating_duration_since(prev_activity);
+        if self.turn_open {
+            if is_active(&self.state) {
+                self.turn_busy_accum += gap;
+            }
+            if is_waiting(&self.state) {
+                self.turn_wait_accum += gap;
+            }
+        }
+
         // Stamp the user-prompt time (used for stable list ordering). Covers all
         // families: Claude/Codex/DeepSeek all emit UserPromptSubmit.
         if matches!(ev.kind, EventKind::UserPromptSubmit) {
@@ -284,6 +335,14 @@ impl AgentSession {
             ts: now,
             summary: summarize_event(ev),
         });
+
+        // A new user prompt closes any open turn before opening a fresh one.
+        // The tail gap was attributed above, so the closed turn's totals are
+        // current as of `now`.
+        if matches!(ev.kind, EventKind::UserPromptSubmit) && self.turn_open {
+            self.pending_closed_turn = Some(self.build_closed_turn(now_wall, false));
+            self.turn_open = false;
+        }
 
         // Snapshot active status before the state machine transition.
         let was_active = is_active(&self.state);
@@ -328,7 +387,81 @@ impl AgentSession {
             }
         }
 
+        // ── Per-turn accounting (history) ────────────────────────────────
+        // Open a fresh turn on a user prompt (state is now Working).
+        if matches!(ev.kind, EventKind::UserPromptSubmit) {
+            self.turn_seq += 1;
+            self.turn_open = true;
+            self.turn_started_wall = Some(now_wall);
+            self.turn_busy_accum = Duration::ZERO;
+            self.turn_wait_accum = Duration::ZERO;
+            self.turn_needed_input = false;
+            self.turn_tool_counts.clear();
+        }
+        // Record that this turn required input once it enters a waiting state.
+        if self.turn_open && is_waiting(&self.state) {
+            self.turn_needed_input = true;
+        }
+        // Count tool invocations within the turn (clarify cards aren't tools).
+        if matches!(ev.kind, EventKind::PreToolUse)
+            && self.turn_open
+            && let Some(tool) = ev.tool_name.as_deref()
+            && !is_clarify_tool(Some(tool))
+        {
+            *self.turn_tool_counts.entry(tool.to_string()).or_insert(0) += 1;
+        }
+        // Stop closes the current turn normally.
+        if matches!(ev.kind, EventKind::Stop) && self.turn_open {
+            self.pending_closed_turn = Some(self.build_closed_turn(now_wall, false));
+            self.turn_open = false;
+        }
+
         remove
+    }
+
+    /// Build a `ClosedTurn` snapshot of the current turn accumulators.
+    fn build_closed_turn(&self, now_wall: SystemTime, incomplete: bool) -> ClosedTurn {
+        ClosedTurn {
+            session_id: self.id.clone(),
+            turn_seq: self.turn_seq,
+            family: self.family.clone(),
+            cwd: self.cwd.clone(),
+            name: self.name.clone(),
+            started_at: self.turn_started_wall.unwrap_or(now_wall),
+            ended_at: now_wall,
+            busy_secs: self.turn_busy_accum.as_secs(),
+            needed_input: self.turn_needed_input,
+            wait_secs: self.turn_wait_accum.as_secs(),
+            incomplete,
+            tool_counts: self.turn_tool_counts.clone(),
+        }
+    }
+
+    /// Take the turn closed by the most recently applied event, if any. The
+    /// daemon calls this after `apply` to persist completed turns.
+    pub fn take_closed_turn(&mut self) -> Option<ClosedTurn> {
+        self.pending_closed_turn.take()
+    }
+
+    /// Flush an open turn as `incomplete` (called when the session is removed
+    /// via SessionEnd or liveness, so its in-flight turn isn't lost). Attributes
+    /// the trailing gap since the last event, then closes the turn.
+    pub fn flush_open_turn(&mut self) -> Option<ClosedTurn> {
+        if !self.turn_open {
+            return None;
+        }
+        let now = Instant::now();
+        let now_wall = SystemTime::now();
+        let gap = now.saturating_duration_since(self.last_activity);
+        if is_active(&self.state) {
+            self.turn_busy_accum += gap;
+        }
+        if is_waiting(&self.state) {
+            self.turn_wait_accum += gap;
+        }
+        let closed = self.build_closed_turn(now_wall, true);
+        self.turn_open = false;
+        Some(closed)
     }
 
     /// State machine for Claude (and Unknown) family events.
@@ -1283,5 +1416,153 @@ mod tests {
         assert!(is_active(&AgentState::Question));
         assert!(!is_active(&AgentState::Done));
         assert!(!is_active(&AgentState::Idle));
+    }
+
+    // ── Per-turn history accounting tests ─────────────────────────────────────
+
+    #[test]
+    fn no_turn_open_before_first_prompt() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        assert!(!s.turn_open, "SessionStart must not open a turn");
+        assert!(s.take_closed_turn().is_none());
+        assert_eq!(s.turn_seq, 0);
+    }
+
+    #[test]
+    fn turn_closes_on_stop_with_busy_time() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.name = "proj".to_string();
+        s.apply(&start);
+
+        s.apply(&make_event(EventKind::UserPromptSubmit));
+        assert!(s.turn_open);
+        assert_eq!(s.turn_seq, 1);
+        assert!(s.take_closed_turn().is_none(), "turn not closed yet");
+
+        // Simulate 5s of working time before Stop (gap attributed to Working).
+        s.last_activity = Instant::now() - Duration::from_secs(5);
+        s.apply(&make_event(EventKind::Stop));
+        assert!(!s.turn_open);
+
+        let ct = s.take_closed_turn().expect("Stop should close the turn");
+        assert_eq!(ct.turn_seq, 1);
+        assert!(!ct.incomplete);
+        assert!(
+            ct.busy_secs >= 5,
+            "busy should include the 5s active gap, got {}",
+            ct.busy_secs
+        );
+        assert_eq!(ct.name, "proj");
+    }
+
+    #[test]
+    fn turn_closes_on_next_prompt_and_increments_seq() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+
+        s.apply(&make_event(EventKind::UserPromptSubmit)); // turn 1
+        assert_eq!(s.turn_seq, 1);
+        assert!(s.take_closed_turn().is_none());
+
+        s.apply(&make_event(EventKind::UserPromptSubmit)); // closes 1, opens 2
+        let ct = s
+            .take_closed_turn()
+            .expect("a new prompt closes the prior turn");
+        assert_eq!(ct.turn_seq, 1);
+        assert!(!ct.incomplete, "a prompt-boundary close is a normal close");
+        assert!(s.turn_open);
+        assert_eq!(s.turn_seq, 2);
+    }
+
+    #[test]
+    fn turn_records_needed_input_and_wait() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        s.apply(&make_event(EventKind::UserPromptSubmit));
+
+        let mut note = make_event(EventKind::Notification);
+        note.notification = Some("Permission required to run: git push".to_string());
+        s.apply(&note);
+        assert_eq!(s.state, AgentState::Approval);
+
+        // 3s of waiting on the user, then the turn ends.
+        s.last_activity = Instant::now() - Duration::from_secs(3);
+        s.apply(&make_event(EventKind::Stop));
+
+        let ct = s.take_closed_turn().unwrap();
+        assert!(ct.needed_input, "turn entered approval → needed_input");
+        assert!(
+            ct.wait_secs >= 3,
+            "wait should include the 3s in approval, got {}",
+            ct.wait_secs
+        );
+    }
+
+    #[test]
+    fn turn_counts_tool_invocations() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        s.apply(&make_event(EventKind::UserPromptSubmit));
+
+        let mut edit = make_event(EventKind::PreToolUse);
+        edit.tool_name = Some("Edit".to_string());
+        edit.tool_input = Some(r#"{"path":"a.rs"}"#.to_string());
+        s.apply(&edit);
+        s.apply(&edit);
+
+        let mut bash = make_event(EventKind::PreToolUse);
+        bash.tool_name = Some("Bash".to_string());
+        bash.tool_input = Some(r#"{"command":"ls"}"#.to_string());
+        s.apply(&bash);
+
+        s.apply(&make_event(EventKind::Stop));
+        let ct = s.take_closed_turn().unwrap();
+        assert_eq!(ct.tool_counts.get("Edit"), Some(&2));
+        assert_eq!(ct.tool_counts.get("Bash"), Some(&1));
+    }
+
+    #[test]
+    fn clarify_card_is_not_counted_as_a_tool() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        s.apply(&make_event(EventKind::UserPromptSubmit));
+
+        let mut clarify = make_event(EventKind::PreToolUse);
+        clarify.tool_name = Some(CLARIFY_TOOL_CLAUDE.to_string());
+        clarify.tool_input = Some(r#"{"questions":[{"question":"q"}]}"#.to_string());
+        s.apply(&clarify);
+        assert_eq!(s.state, AgentState::Question);
+
+        s.apply(&make_event(EventKind::Stop));
+        let ct = s.take_closed_turn().unwrap();
+        assert!(
+            ct.tool_counts.is_empty(),
+            "a clarify card is a question, not a tool invocation"
+        );
+        assert!(ct.needed_input, "clarify puts the turn into needs-input");
+    }
+
+    #[test]
+    fn flush_open_turn_marks_incomplete() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        // No open turn yet → flush is a no-op.
+        assert!(s.flush_open_turn().is_none());
+
+        s.apply(&make_event(EventKind::UserPromptSubmit));
+        assert!(s.turn_open);
+        let ct = s
+            .flush_open_turn()
+            .expect("an open turn should flush on removal");
+        assert!(ct.incomplete, "a removal-flush is marked incomplete");
+        assert!(!s.turn_open);
     }
 }
