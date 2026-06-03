@@ -15,8 +15,10 @@ pub const COLOR_APPROVAL: Color = Color::Rgb(0xe3, 0xb3, 0x41);
 pub const COLOR_APPROVAL_DIM: Color = Color::Rgb(0x8a, 0x6a, 0x1f);
 pub const COLOR_QUESTION: Color = Color::Rgb(0x58, 0xc4, 0xd6);
 pub const COLOR_WORKING: Color = Color::Rgb(0x6f, 0xd2, 0x83);
-pub const COLOR_DONE: Color = Color::Rgb(0x7f, 0x9e, 0x84);
+pub const COLOR_DONE: Color = Color::Rgb(0x83, 0xcf, 0x90);
 pub const COLOR_IDLE: Color = Color::Rgb(0x76, 0x83, 0x90);
+/// Offline group header colour — warm grey, spec §10.
+pub const COLOR_OFFLINE: Color = Color::Rgb(0xc8, 0x9a, 0x6a);
 
 // ── Family colours ───────────────────────────────────────────────────────────
 
@@ -27,6 +29,9 @@ pub const COLOR_CODEX: Color = Color::Reset;
 pub const COLOR_DEEPSEEK: Color = Color::Rgb(0x4d, 0x6b, 0xfe); // DeepSeek blue
 pub const COLOR_CURSOR: Color = Color::Rgb(0x8b, 0x5c, 0xf6); // Cursor violet
 pub const COLOR_UNKNOWN: Color = Color::Rgb(0x8b, 0x94, 0x9e);
+
+// ── Remote device name (cold blue §10) ───────────────────────────────────────
+pub const COLOR_REMOTE: Color = Color::Rgb(0x7e, 0xa7, 0xd8);
 
 // ── Accent (selection bar ▌) ─────────────────────────────────────────────────
 pub const COLOR_ACCENT: Color = Color::Rgb(0xd9, 0x77, 0x57);
@@ -52,9 +57,7 @@ pub fn family_icon(family: &crate::protocol::AgentFamily) -> (&'static str, Colo
     (family.icon(), family_color(family))
 }
 
-/// Per-family foreground colour. Used for the family icon/label, and (via the
-/// selected session) for the dynamic accent on the `roost` title, selection
-/// bar, and peek header.
+/// Per-family foreground colour. Used for the family icon/label in rows and cards.
 pub fn family_color(family: &crate::protocol::AgentFamily) -> Color {
     use crate::protocol::AgentFamily;
     match family {
@@ -132,6 +135,18 @@ impl Theme {
             fg_bright: Color::Reset, // callers add Modifier::BOLD where needed
             dim: Color::DarkGray,
             mid: Color::DarkGray,
+        }
+    }
+
+    /// Classic theme with an explicit border colour.
+    ///
+    /// Used at startup to inject a background-adaptive border colour detected
+    /// via OSC 11: light terminals get a lighter grey; dark terminals keep
+    /// `DarkGray` (same as `classic()`).
+    pub fn classic_with_border(border: Color) -> Self {
+        Theme {
+            border,
+            ..Self::classic()
         }
     }
 }

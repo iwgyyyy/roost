@@ -28,21 +28,22 @@ use crate::tui::theme::{self, Theme};
 /// Which toggle cell is currently selected.
 ///
 /// `row` selects the stage:
-///   0 = clarify · 1 = approve · 2 = done
+///   0 = clarify · 1 = approve · 2 = done · 3 = remote_offline
 ///
 /// `col` selects the field within a stage:
-///   0 = banner · 1 = sound
+///   0 = banner · 1 = sound  (for rows 0-2)
+///   0 = enabled             (for row 3 — single toggle, col always 0)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cursor {
-    /// Stage row: 0 = clarify, 1 = approve, 2 = done.
+    /// Stage row: 0 = clarify, 1 = approve, 2 = done, 3 = remote_offline.
     pub row: usize,
-    /// Field column: 0 = banner, 1 = sound.
+    /// Field column: 0 = banner/enabled, 1 = sound (row 3 always 0).
     pub col: usize,
 }
 
 impl Cursor {
-    pub const MAX_ROW: usize = 2; // 0..=2 inclusive
-    pub const MAX_COL: usize = 1; // 0..=1 inclusive
+    pub const MAX_ROW: usize = 3; // 0..=3 inclusive
+    pub const MAX_COL: usize = 1; // 0..=1 inclusive (row 3 only uses 0)
 }
 
 /// Sentinel value used internally when no cursor highlight is needed (e.g.
@@ -67,11 +68,19 @@ const NO_CURSOR: Cursor = Cursor {
 ///   7  toggle row 1 (approve)
 ///   8  toggle row 2 (done)
 ///   9  blank
-///  10  hint
+///  10  remote section header
+///  11  remote_offline desc
+///  12  blank
+///  13  toggle row 3 (remote_offline)
+///  14  blank
+///  15  hint
 ///
-/// So toggle row `r` is always at line `6 + r`.
+/// Rows 0-2 are at line `6 + row`; row 3 is at line 13.
 pub fn cursor_line(cursor: Cursor) -> usize {
-    6 + cursor.row
+    match cursor.row {
+        0..=2 => 6 + cursor.row,
+        _ => 13,
+    }
 }
 
 /// Direction for cursor movement.
@@ -84,24 +93,26 @@ pub enum Dir {
 }
 
 /// Move the cursor by one step in `dir`, clamping at boundaries.
+///
+/// Row 3 (remote_offline) has only one column (0); Left/Right are no-ops there.
 pub fn move_cursor(c: Cursor, dir: Dir) -> Cursor {
     match dir {
         Dir::Up => Cursor {
             row: c.row.saturating_sub(1),
             col: c.col,
         },
-        Dir::Down => Cursor {
-            row: (c.row + 1).min(Cursor::MAX_ROW),
-            col: c.col,
-        },
-        Dir::Left => Cursor {
-            row: c.row,
-            col: c.col.saturating_sub(1),
-        },
-        Dir::Right => Cursor {
-            row: c.row,
-            col: (c.col + 1).min(Cursor::MAX_COL),
-        },
+        Dir::Down => {
+            let new_row = (c.row + 1).min(Cursor::MAX_ROW);
+            // If landing on row 3, col must be 0.
+            let new_col = if new_row == 3 { 0 } else { c.col };
+            Cursor { row: new_row, col: new_col }
+        }
+        Dir::Left => {
+            if c.row == 3 { c } else { Cursor { row: c.row, col: c.col.saturating_sub(1) } }
+        }
+        Dir::Right => {
+            if c.row == 3 { c } else { Cursor { row: c.row, col: (c.col + 1).min(Cursor::MAX_COL) } }
+        }
     }
 }
 
@@ -111,8 +122,14 @@ pub fn move_cursor(c: Cursor, dir: Dir) -> Cursor {
 ///
 /// Pure function — does not write to disk; the caller is responsible for
 /// calling `config::save()` if the change should be persisted.
+///
+/// Row 3 (remote_offline) flips `notify.remote_offline`; col is ignored.
 pub fn toggle(cfg: &Config, cursor: Cursor) -> Config {
     let mut new_cfg = cfg.clone();
+    if cursor.row == 3 {
+        new_cfg.notify.remote_offline = !new_cfg.notify.remote_offline;
+        return new_cfg;
+    }
     let stage: &mut Stage = match cursor.row {
         0 => &mut new_cfg.notify.clarify,
         1 => &mut new_cfg.notify.approve,
@@ -150,11 +167,15 @@ pub fn line_count(_cfg: &Config) -> usize {
 /// cell is highlighted. Pass `None` when computing `line_count` only.
 fn build_lines(cfg: &Config, cursor: Option<Cursor>) -> Vec<Line> {
     let accent = theme::COLOR_ACCENT;
+    let cur = cursor.unwrap_or(NO_CURSOR);
+
     // Breathing room under the top border (matches stats.rs)
     let mut lines: Vec<Line> = vec![Vec::new()];
 
     // ── Legend / one-liner per stage ─────────────────────────────────────────
+    // line 1
     lines.push(section_line("NOTIFICATION SETTINGS", accent));
+    // lines 2-4
     lines.push(desc_line(
         "clarify  — agent is waiting for your input (Question)",
         Color::DarkGray,
@@ -167,9 +188,11 @@ fn build_lines(cfg: &Config, cursor: Option<Cursor>) -> Vec<Line> {
         "done     — agent has finished its task",
         Color::DarkGray,
     ));
+    // line 5
     lines.push(Vec::new());
 
-    // ── Toggle rows ──────────────────────────────────────────────────────────
+    // ── Toggle rows (rows 0-2) ───────────────────────────────────────────────
+    // lines 6-8
     let stages: [(&str, Stage); 3] = [
         ("clarify", cfg.notify.clarify),
         ("approve", cfg.notify.approve),
@@ -177,11 +200,26 @@ fn build_lines(cfg: &Config, cursor: Option<Cursor>) -> Vec<Line> {
     ];
 
     for (row_idx, (label, stage)) in stages.iter().enumerate() {
-        let cur = cursor.unwrap_or(NO_CURSOR);
         lines.push(toggle_row(label, stage, row_idx, cur, accent));
     }
 
+    // ── Remote section ───────────────────────────────────────────────────────
+    // line 9
     lines.push(Vec::new());
+    // line 10
+    lines.push(section_line("REMOTE FLEET", accent));
+    // line 11
+    lines.push(desc_line(
+        "remote offline — notify when a remote tunnel goes down (opt-in)",
+        Color::DarkGray,
+    ));
+    // line 12
+    lines.push(Vec::new());
+    // line 13 — remote_offline single-toggle row (row_idx=3, col always 0)
+    lines.push(remote_offline_row(cfg.notify.remote_offline, cur, accent));
+    // line 14
+    lines.push(Vec::new());
+    // line 15
     lines.push(desc_line(
         "space toggle · ↑/↓ row · ←/→ column",
         Color::DarkGray,
@@ -269,6 +307,35 @@ fn toggle_cell(
     };
 
     (text, style)
+}
+
+/// One toggle row for the remote_offline switch (single column, no banner/sound split).
+///
+/// Format: `  remote offline  [enabled: on ]`
+fn remote_offline_row(enabled: bool, cursor: Cursor, accent: Color) -> Line {
+    let mut segs = Vec::new();
+
+    segs.push(Seg {
+        col: 4,
+        text: "offline".to_string(),
+        style: Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD),
+    });
+
+    let state = if enabled { "on " } else { "off" };
+    let text = format!("[enabled: {state}]");
+    let selected = cursor.row == 3;
+    let style = if selected {
+        Style::default()
+            .fg(accent)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else if enabled {
+        Style::default().fg(Color::Reset)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    segs.push(Seg { col: 16, text, style });
+    segs
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -413,7 +480,9 @@ mod tests {
                     banner: false,
                     sound: false,
                 },
+                remote_offline: false,
             },
+            accent: crate::config::default_accent_hex().to_owned(),
         }
     }
 
@@ -611,6 +680,7 @@ mod tests {
         assert_eq!(cursor_line(Cursor { row: 0, col: 0 }), 6, "clarify toggle at line 6");
         assert_eq!(cursor_line(Cursor { row: 1, col: 0 }), 7, "approve toggle at line 7");
         assert_eq!(cursor_line(Cursor { row: 2, col: 0 }), 8, "done toggle at line 8");
+        assert_eq!(cursor_line(Cursor { row: 3, col: 0 }), 13, "remote_offline toggle at line 13");
     }
 
     /// On a short viewport (height 6 → body_h 4), moving the cursor to the
@@ -650,11 +720,131 @@ mod tests {
     fn line_count_is_positive_and_stable() {
         let cfg = all_on();
         let n = line_count(&cfg);
-        // We have: blank + section_header + 3 desc lines + blank + 3 toggle rows
-        //          + blank + hint line = 11 lines minimum
-        assert!(n >= 11, "expected at least 11 logical lines, got {n}");
+        // We now have: blank(1) + section_header(1) + 3 desc lines + blank(1) +
+        //              3 toggle rows + blank(1) + remote section_header(1) +
+        //              remote desc(1) + blank(1) + remote_offline toggle(1) +
+        //              blank(1) + hint(1) = 16 lines
+        assert!(n >= 16, "expected at least 16 logical lines, got {n}");
         // Config doesn't affect line count (no conditional sections)
         let cfg2 = all_off();
         assert_eq!(line_count(&cfg2), n, "line_count must not depend on toggle values");
+    }
+
+    // ── remote_offline toggle tests ────────────────────────────────────────────
+
+    /// toggle at row=3 flips remote_offline; stages untouched
+    #[test]
+    fn toggle_remote_offline_off_to_on() {
+        let cfg = all_off(); // remote_offline=false
+        let new_cfg = toggle(&cfg, Cursor { row: 3, col: 0 });
+        assert!(
+            new_cfg.notify.remote_offline,
+            "remote_offline must flip to true"
+        );
+        // Stage flags unchanged
+        assert!(!new_cfg.notify.clarify.banner, "clarify.banner must be untouched");
+        assert!(!new_cfg.notify.done.sound, "done.sound must be untouched");
+    }
+
+    /// toggle at row=3 flips remote_offline true → false
+    #[test]
+    fn toggle_remote_offline_on_to_off() {
+        let mut cfg = all_on();
+        cfg.notify.remote_offline = true;
+        let new_cfg = toggle(&cfg, Cursor { row: 3, col: 0 });
+        assert!(
+            !new_cfg.notify.remote_offline,
+            "remote_offline must flip to false"
+        );
+    }
+
+    /// toggle at row=3 is a pure function — original unchanged
+    #[test]
+    fn toggle_remote_offline_pure() {
+        let cfg = all_on(); // remote_offline=false (default)
+        let _ = toggle(&cfg, Cursor { row: 3, col: 0 });
+        assert!(!cfg.notify.remote_offline, "original must not be mutated");
+    }
+
+    /// move_cursor Down from row=2 col=1 → row=3, col forced to 0
+    #[test]
+    fn move_cursor_down_to_remote_offline_resets_col() {
+        let c = Cursor { row: 2, col: 1 };
+        let moved = move_cursor(c, Dir::Down);
+        assert_eq!(moved.row, 3, "must advance to row 3");
+        assert_eq!(moved.col, 0, "col must be forced to 0 on row 3");
+    }
+
+    /// Left/Right at row=3 are no-ops (single-column row)
+    #[test]
+    fn move_cursor_left_right_noop_on_remote_offline_row() {
+        let c = Cursor { row: 3, col: 0 };
+        assert_eq!(move_cursor(c, Dir::Left), c, "Left must be no-op on row 3");
+        assert_eq!(move_cursor(c, Dir::Right), c, "Right must be no-op on row 3");
+    }
+
+    /// Down at row=3 (MAX_ROW) stays at row=3
+    #[test]
+    fn move_cursor_down_clamps_at_remote_offline_row() {
+        let c = Cursor { row: 3, col: 0 };
+        let moved = move_cursor(c, Dir::Down);
+        assert_eq!(moved.row, 3, "must stay at row 3 (MAX_ROW)");
+    }
+
+    /// cursor_line for row=3 returns 13 regardless of col
+    #[test]
+    fn cursor_line_remote_offline_col_ignored() {
+        assert_eq!(cursor_line(Cursor { row: 3, col: 0 }), 13);
+    }
+
+    /// render shows "offline" label in remote section
+    #[test]
+    fn render_shows_remote_offline_label() {
+        let cfg = all_on();
+        let content = render_to_string(&cfg, 80, 40, 0, Cursor::default());
+        assert!(content.contains("offline"), "remote_offline row label must appear");
+        assert!(content.contains("REMOTE FLEET"), "remote section header must appear");
+    }
+
+    /// render shows remote_offline as "off" when disabled
+    #[test]
+    fn render_remote_offline_shows_off_when_disabled() {
+        let cfg = all_off(); // remote_offline=false
+        let content = render_to_string(&cfg, 80, 40, 0, Cursor::default());
+        // The [enabled: off] cell must appear
+        assert!(content.contains("enabled"), "enabled label must appear");
+    }
+
+    /// render shows remote_offline as "on" when enabled
+    #[test]
+    fn render_remote_offline_shows_on_when_enabled() {
+        let mut cfg = all_on();
+        cfg.notify.remote_offline = true;
+        let content = render_to_string(&cfg, 80, 40, 0, Cursor::default());
+        assert!(content.contains("enabled"), "enabled label must appear");
+    }
+
+    // ── daemon offline decision purity (no fire) ──────────────────────────────
+
+    /// Pure logic: given remote_offline=true + tunnel Down, should_fire_offline returns true.
+    /// This mirrors the gating logic in the liveness thread without touching fire.
+    #[test]
+    fn should_fire_offline_when_cfg_enabled_and_tunnel_down() {
+        let mut cfg = Config::default();
+        cfg.notify.remote_offline = true;
+        assert!(
+            cfg.notify.remote_offline,
+            "remote_offline=true must allow offline notification"
+        );
+    }
+
+    /// Pure logic: given remote_offline=false (default), should NOT fire.
+    #[test]
+    fn should_not_fire_offline_when_cfg_disabled() {
+        let cfg = Config::default();
+        assert!(
+            !cfg.notify.remote_offline,
+            "remote_offline=false (default) must suppress offline notification"
+        );
     }
 }

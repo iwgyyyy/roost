@@ -30,17 +30,24 @@ impl Group {
 // ── group_and_sort ─────────────────────────────────────────────────────────────
 
 /// Group and sort sessions per spec §6:
-///   NEEDS INPUT (Approval > Question) > WORKING > IDLE (Done, Idle)
+///   NEEDS INPUT (Approval > Question) > WORKING > IDLE (Done, Idle) > OFFLINE
 ///
-/// Within each sub-group, rows are sorted by `last_activity_secs` ascending
-/// (most-recently-active first, i.e. fewest seconds since last event).
+/// Sessions with `stale == true` (remote tunnel disconnected) are always placed
+/// in the OFFLINE group regardless of their state, and the OFFLINE group is
+/// rendered last. Within each sub-group, rows are sorted by
+/// `last_prompt_age_secs` ascending (most-recently-active first).
 pub fn group_and_sort(sessions: &[SessionView]) -> Vec<Group> {
     let mut approvals: Vec<SessionView> = Vec::new();
     let mut questions: Vec<SessionView> = Vec::new();
     let mut working: Vec<SessionView> = Vec::new();
     let mut idle_done: Vec<SessionView> = Vec::new();
+    let mut offline: Vec<SessionView> = Vec::new();
 
     for s in sessions {
+        if s.stale {
+            offline.push(s.clone());
+            continue;
+        }
         match s.state.as_str() {
             "approval" => approvals.push(s.clone()),
             "question" => questions.push(s.clone()),
@@ -54,6 +61,7 @@ pub fn group_and_sort(sessions: &[SessionView]) -> Vec<Group> {
     sort_by_recency(&mut questions);
     sort_by_recency(&mut working);
     sort_by_recency(&mut idle_done);
+    sort_by_recency(&mut offline);
 
     let mut groups: Vec<Group> = Vec::new();
 
@@ -81,6 +89,15 @@ pub fn group_and_sort(sessions: &[SessionView]) -> Vec<Group> {
             title: "IDLE",
             state_color: theme::COLOR_IDLE,
             rows: idle_done,
+        });
+    }
+
+    // OFFLINE: stale sessions (remote tunnel disconnected) — always last.
+    if !offline.is_empty() {
+        groups.push(Group {
+            title: "OFFLINE",
+            state_color: theme::COLOR_OFFLINE,
+            rows: offline,
         });
     }
 
@@ -220,6 +237,7 @@ mod tests {
             id: format!("{state}-{secs}"),
             family: AgentFamily::Claude,
             name: format!("repo-{state}"),
+            cwd: String::new(),
             state: state.to_string(),
             activity: None,
             last_activity_secs: secs,
@@ -237,6 +255,8 @@ mod tests {
             workspace_path: None,
             codex_thread_id: None,
             pane_title: None,
+            origin: "local".to_string(),
+            stale: false,
         }
     }
 
@@ -413,5 +433,102 @@ mod tests {
         let sessions = vec![sv("working", 1), sv("done", 2), sv("approval", 3)];
         let groups = group_and_sort(&sessions);
         assert_eq!(total_rows(&groups), 3);
+    }
+
+    // ── origin / stale defaults ─────────────────────────────────────────────
+
+    #[test]
+    fn session_view_defaults_origin_local_and_not_stale() {
+        let s = sv("working", 10);
+        assert_eq!(s.origin, "local", "origin should default to local");
+        assert!(!s.stale, "stale should default to false");
+    }
+
+    // ── OFFLINE group ────────────────────────────────────────────────────────
+
+    fn sv_stale(state: &str, secs: u64) -> SessionView {
+        let mut s = sv(state, secs);
+        s.stale = true;
+        s
+    }
+
+    #[test]
+    fn stale_session_goes_to_offline_group_not_original_state_group() {
+        // A stale working session must NOT appear in WORKING — only in OFFLINE.
+        let sessions = vec![sv_stale("working", 5)];
+        let groups = group_and_sort(&sessions);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].title, "OFFLINE");
+        assert_eq!(groups[0].count(), 1);
+    }
+
+    #[test]
+    fn stale_approval_goes_to_offline_not_needs_input() {
+        let sessions = vec![sv_stale("approval", 2)];
+        let groups = group_and_sort(&sessions);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].title, "OFFLINE");
+    }
+
+    #[test]
+    fn offline_group_is_last_after_all_normal_groups() {
+        let sessions = vec![
+            sv("approval", 1),
+            sv("working", 2),
+            sv("idle", 3),
+            sv_stale("working", 4),
+        ];
+        let groups = group_and_sort(&sessions);
+        let titles: Vec<&str> = groups.iter().map(|g| g.title).collect();
+        assert_eq!(titles, vec!["NEEDS INPUT", "WORKING", "IDLE", "OFFLINE"]);
+    }
+
+    #[test]
+    fn no_stale_sessions_means_no_offline_group() {
+        let sessions = vec![sv("working", 1), sv("idle", 2)];
+        let groups = group_and_sort(&sessions);
+        assert!(
+            groups.iter().all(|g| g.title != "OFFLINE"),
+            "OFFLINE group must not appear when there are no stale sessions"
+        );
+    }
+
+    #[test]
+    fn offline_group_state_color_is_warm_grey() {
+        let sessions = vec![sv_stale("working", 5)];
+        let groups = group_and_sort(&sessions);
+        let offline = groups.iter().find(|g| g.title == "OFFLINE").unwrap();
+        assert_eq!(offline.state_color, theme::COLOR_OFFLINE);
+        assert_eq!(offline.state_color, ratatui::style::Color::Rgb(0xc8, 0x9a, 0x6a));
+    }
+
+    #[test]
+    fn stale_working_does_not_appear_in_working_group() {
+        let sessions = vec![sv("working", 1), sv_stale("working", 2)];
+        let groups = group_and_sort(&sessions);
+        let working = groups.iter().find(|g| g.title == "WORKING").unwrap();
+        // Normal working session is here; stale one must not be.
+        assert_eq!(working.count(), 1);
+        assert!(
+            working.rows.iter().all(|r| !r.stale),
+            "WORKING group must not contain stale sessions"
+        );
+    }
+
+    #[test]
+    fn offline_group_sorted_by_recency() {
+        let sessions = vec![sv_stale("working", 30), sv_stale("idle", 5)];
+        let groups = group_and_sort(&sessions);
+        let offline = groups.iter().find(|g| g.title == "OFFLINE").unwrap();
+        assert_eq!(offline.count(), 2);
+        // smaller last_prompt_age_secs (5) should be first
+        assert_eq!(offline.rows[0].last_prompt_age_secs, Some(5));
+        assert_eq!(offline.rows[1].last_prompt_age_secs, Some(30));
+    }
+
+    #[test]
+    fn empty_input_still_yields_no_offline_group() {
+        let groups = group_and_sort(&[]);
+        assert!(groups.iter().all(|g| g.title != "OFFLINE"));
     }
 }

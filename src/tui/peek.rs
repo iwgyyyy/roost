@@ -1,21 +1,27 @@
 //! Peek detail panel — renders a rounded-corner box overlaying the list.
 //!
-//! Design spec §7 (design_handoff README §7):
+//! Design spec §7:
 //!
 //! ```text
-//! ╭─ peek · payments-api ──────────────────────────────────────╮
-//! │  agent    ✻ Claude Code                                     │
-//! │  path     ~/dev/acme/payments-api                           │
-//! │  status   ▲ Needs input · Approval                          │
-//! │  action   run: git push --force origin main                 │
-//! │  since    waiting for your approval · 8s                    │
-//! │                                                             │
-//! │  recent                                                     │
-//! │      8s  ▲ asked to run git push --force                    │
-//! │     40s  ✎ edited 3 files in src/                           │
-//! │      1m  ⚙ ran test suite · 142 passed                      │
-//! ╰─ esc close ────────────────────────────────────────────────╯
+//! ╭─ peek · payments-api ──────────────────────────────────╮
+//! │  agent    ✻ Claude Code                                │
+//! │  status   ▲ Needs input · Approval                     │
+//! │  source   @local  · via Cursor                         │
+//! │  path     ~/dev/acme/payments-api                      │
+//! │  step     run: git push --force origin main            │
+//! │  since    waiting for your approval · 8s               │
+//! │                                                        │
+//! │  recent                                                │
+//! │      8s  ▲ asked to run git push --force               │
+//! │     40s  ✎ edited 3 files in src/                      │
+//! │      1m  ⚙ ran test suite · 142 passed                 │
+//! ╰─ esc close ────────────────────────────────────────────╯
 //! ```
+//!
+//! Offline branch (stale=true):
+//!   status  → `⊘ offline · remote disconnected`
+//!   since   → `last seen · <duration>`
+//!   timeline contains "lost connection"
 //!
 //! All text truncation uses unicode-width to handle CJK correctly.
 //! Right border is placed at exactly `area.x + area.width - 1`.
@@ -42,11 +48,14 @@ use crate::tui::{
 /// If `area` is too small for the minimum layout, renders nothing (caller
 /// should switch to full-screen mode).
 /// Number of recent-event rows that fit in a peek panel of the given height.
-/// `has_action` accounts for the optional `action` field taking one extra row.
+/// `has_step` accounts for the optional `step` field taking one extra row.
 /// Mirrors the fixed "chrome" rows rendered by [`render_peek`].
-pub fn recent_rows_capacity(area_height: u16, has_action: bool) -> usize {
-    // header(1) + agent/path/status/since(4) + action(0|1) + blank(1) + recent-label(1) + footer(1)
-    let chrome = 1 + 4 + has_action as u16 + 1 + 1 + 1;
+///
+/// Fixed rows: header(1) + agent + status + source + path + since(5) +
+///             step(0|1) + blank(1) + recent-label(1) + footer(1) = 9 + step.
+pub fn recent_rows_capacity(area_height: u16, has_step: bool) -> usize {
+    // header(1) + agent/status/source/path/since(5) + step(0|1) + blank(1) + recent-label(1) + footer(1)
+    let chrome = 1 + 5 + has_step as u16 + 1 + 1 + 1;
     area_height.saturating_sub(chrome) as usize
 }
 
@@ -149,61 +158,104 @@ pub fn render_peek(
 
     // ── Field: agent ──
     // Label in DarkGray; value (icon + agent name) in family colour (semantic RGB).
+    // Offline: family colour stays (icon identity doesn't change when stale).
     if row < footer_y {
         let (_, icon_color) = theme::family_icon(&detail.family);
+        let agent_style = if detail.stale {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(icon_color)
+        };
+        render_field_row(buf, row, "agent   ", &detail.agent_display, agent_style);
+        row += 1;
+    }
+
+    // ── Field: status ──
+    // Offline branch: "⊘ offline · remote disconnected" in COLOR_OFFLINE (warm grey).
+    // Online branch: glyph + full label in state colour.
+    if row < footer_y {
+        let (status_value, status_style) = if detail.stale {
+            (
+                "⊘ offline · remote disconnected".to_string(),
+                Style::default().fg(theme::COLOR_OFFLINE),
+            )
+        } else {
+            let (glyph, color) = theme::state_glyph(&detail.state);
+            let label = state_full_label(&detail.state);
+            (
+                format!("{glyph} {label}"),
+                Style::default().fg(color),
+            )
+        };
+        render_field_row(buf, row, "status  ", &status_value, status_style);
+        row += 1;
+    }
+
+    // ── Field: source ──
+    // Format: `@local` (dim) or `@<device>` (cold blue) + `  · via <App>` (dim).
+    // The device segment and via-app segment are written separately so that
+    // the device name gets the remote cold-blue colour while the rest stays dim.
+    if row < footer_y {
+        let is_local = detail.origin == "local" || detail.origin.is_empty();
+        let device_str = format!("@{}", detail.origin);
+        let via_str = detail
+            .host_app
+            .as_deref()
+            .map(capitalise)
+            .map(|app| format!("  · via {app}"))
+            .unwrap_or_default();
+        let source_value = format!("{device_str}{via_str}");
+        let device_color = if is_local || detail.stale {
+            Color::DarkGray
+        } else {
+            theme::COLOR_REMOTE
+        };
         render_field_row(
             buf,
             row,
-            "agent   ",
-            &detail.agent_display,
-            Style::default().fg(icon_color),
+            "source  ",
+            &source_value,
+            Style::default().fg(device_color),
         );
         row += 1;
     }
 
     // ── Field: path ──
-    // Label in DarkGray; value in terminal default fg (adaptive).
+    // Label in DarkGray; value in terminal default fg (dim when stale).
     if row < footer_y {
-        render_field_row(
-            buf,
-            row,
-            "path    ",
-            &detail.cwd,
-            Style::default().fg(Color::Reset),
-        );
+        let path_style = if detail.stale {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Reset)
+        };
+        render_field_row(buf, row, "path    ", &detail.cwd, path_style);
         row += 1;
     }
 
-    // ── Field: status ──
-    // Label in DarkGray; value (glyph + label) in state colour (semantic RGB).
-    if row < footer_y {
-        let (glyph, color) = theme::state_glyph(&detail.state);
-        let label = state_full_label(&detail.state);
-        let value = format!("{glyph} {label}");
-        render_field_row(buf, row, "status  ", &value, Style::default().fg(color));
-        row += 1;
-    }
-
-    // ── Field: action ──
-    // Label in DarkGray; value in terminal default fg.
+    // ── Field: step ──
+    // Shows the current action text. Label changed from "action" to "step" per §7.
+    // Offline: show last-known step (the action field carries it from the daemon).
     if row < footer_y
-        && let Some(action) = &detail.action
+        && let Some(step) = &detail.action
     {
-        render_field_row(
-            buf,
-            row,
-            "action  ",
-            action,
-            Style::default().fg(Color::Reset),
-        );
+        let step_style = if detail.stale {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Reset)
+        };
+        render_field_row(buf, row, "step    ", step, step_style);
         row += 1;
     }
 
-    // ── Field: since (waiting reason + duration) ──
-    // Label in DarkGray; value in terminal default fg.
+    // ── Field: since ──
+    // Offline: "last seen · <duration>".
+    // Online with waiting reason: "<reason> · <duration>".
+    // Otherwise: plain duration.
     if row < footer_y {
         let time_str = anim::relative_time(detail.since_secs);
-        let since_value = if let Some(reason) = &detail.waiting_reason {
+        let since_value = if detail.stale {
+            format!("last seen · {time_str}")
+        } else if let Some(reason) = &detail.waiting_reason {
             format!("{reason} · {time_str}")
         } else {
             time_str
@@ -315,6 +367,16 @@ fn state_full_label(state: &str) -> &'static str {
     }
 }
 
+// ── Capitalise first letter of a &str (ASCII-only, sufficient for app names) ──
+
+fn capitalise(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -351,6 +413,38 @@ mod tests {
                     duration_secs: Some(20),
                 },
             ],
+            origin: "local".to_string(),
+            host_app: Some("cursor".to_string()),
+            stale: false,
+        }
+    }
+
+    fn make_offline_detail() -> SessionDetail {
+        SessionDetail {
+            id: "data-pipeline".to_string(),
+            family: AgentFamily::Claude,
+            name: "data-pipeline".to_string(),
+            agent_display: "✻ Claude Code".to_string(),
+            cwd: "~/ml/data-pipeline".to_string(),
+            state: "working".to_string(),
+            action: Some("Training run · epoch 4/10".to_string()),
+            waiting_reason: None,
+            since_secs: 120,
+            recent_events: vec![
+                Event {
+                    ts_secs: 120,
+                    summary: "lost connection".to_string(),
+                    duration_secs: None,
+                },
+                Event {
+                    ts_secs: 240,
+                    summary: "⚙ started training epoch 4".to_string(),
+                    duration_secs: Some(120),
+                },
+            ],
+            origin: "gpu-rig".to_string(),
+            host_app: Some("cursor".to_string()),
+            stale: true,
         }
     }
 
@@ -422,10 +516,11 @@ mod tests {
 
     #[test]
     fn recent_rows_capacity_accounts_for_chrome() {
-        // chrome = header + 4 fields + blank + recent-label + footer = 8 (no action)
-        assert_eq!(recent_rows_capacity(20, false), 12);
-        // +1 for the action row
-        assert_eq!(recent_rows_capacity(20, true), 11);
+        // chrome = header(1) + agent/status/source/path/since(5) + blank(1) +
+        //          recent-label(1) + footer(1) = 9 (no step)
+        assert_eq!(recent_rows_capacity(20, false), 11);
+        // +1 for the step row
+        assert_eq!(recent_rows_capacity(20, true), 10);
         // Too small for any recent rows
         assert_eq!(recent_rows_capacity(6, false), 0);
     }
@@ -434,15 +529,16 @@ mod tests {
     fn peek_scroll_reveals_older_events() {
         // 8 events, a small panel: scroll=0 shows the newest, scrolling reveals
         // older ones and drops the newest from view.
+        // chrome=9 (no step), so capacity(12) = 12-9 = 3 recent rows.
         let detail = make_detail_with_events(8);
-        let (w, h) = (60u16, 12u16); // capacity = 12 - 8 = 4 recent rows
+        let (w, h) = (60u16, 12u16); // capacity = 12 - 9 = 3 recent rows
 
         let top = render_peek_scrolled(w, h, &detail, 0);
         let top_text = buf_text(&top, w, h);
         assert!(top_text.contains("EV00"), "scroll=0 should show newest EV00");
         assert!(
-            !top_text.contains("EV06"),
-            "scroll=0 should not yet show old EV06"
+            !top_text.contains("EV05"),
+            "scroll=0 should not yet show old EV05"
         );
 
         let scrolled = render_peek_scrolled(w, h, &detail, 4);
@@ -694,6 +790,7 @@ mod tests {
             id: "payments-api".to_string(),
             family: AgentFamily::Claude,
             name: "payments-api".to_string(),
+            cwd: String::new(),
             state: "approval".to_string(),
             activity: Some("run: git push --force".to_string()),
             last_activity_secs: 8,
@@ -710,6 +807,8 @@ mod tests {
             workspace_path: None,
             codex_thread_id: None,
             pane_title: None,
+            origin: "local".to_string(),
+            stale: false,
         }];
         let groups = group_and_sort(&sessions);
         let selection = Selection { index: Some(0) };
@@ -729,7 +828,7 @@ mod tests {
                 daemon_ready: true,
                 anim: &anim,
                 theme: &theme,
-                scroll_offset: 0,
+                accent: crate::tui::theme::COLOR_ACCENT,
                 peek_open: true,
                 jump_status: None,
             };
@@ -749,5 +848,217 @@ mod tests {
             println!("|{}|", row_string(&buf, width, y));
         }
         println!("=== end combined dump ===\n");
+    }
+
+    // ── §7 field-order & new fields ────────────────────────────────────────────
+
+    /// Fields must appear in §7 order: agent, status, source, path, step, since.
+    /// We scan the buffer row-by-row and record the y-coordinate of the first
+    /// row that contains each label, then assert the ordering.
+    #[test]
+    fn peek_field_order_agent_status_source_path_step_since() {
+        let detail = make_detail();
+        let buf = render_peek_to_buf(70, 18, &detail);
+
+        let mut agent_y: Option<u16> = None;
+        let mut status_y: Option<u16> = None;
+        let mut source_y: Option<u16> = None;
+        let mut path_y: Option<u16> = None;
+        let mut step_y: Option<u16> = None;
+        let mut since_y: Option<u16> = None;
+
+        for y in 0..18u16 {
+            let row = row_string(&buf, 70, y);
+            if row.contains("agent") && agent_y.is_none() {
+                agent_y = Some(y);
+            }
+            if row.contains("status") && status_y.is_none() {
+                status_y = Some(y);
+            }
+            if row.contains("source") && source_y.is_none() {
+                source_y = Some(y);
+            }
+            if row.contains("path") && path_y.is_none() {
+                path_y = Some(y);
+            }
+            if row.contains("step") && step_y.is_none() {
+                step_y = Some(y);
+            }
+            if row.contains("since") && since_y.is_none() {
+                since_y = Some(y);
+            }
+        }
+
+        assert!(agent_y.is_some(), "agent field missing");
+        assert!(status_y.is_some(), "status field missing");
+        assert!(source_y.is_some(), "source field missing");
+        assert!(path_y.is_some(), "path field missing");
+        assert!(step_y.is_some(), "step field missing");
+        assert!(since_y.is_some(), "since field missing");
+
+        let a = agent_y.unwrap();
+        let st = status_y.unwrap();
+        let so = source_y.unwrap();
+        let p = path_y.unwrap();
+        let sp = step_y.unwrap();
+        let si = since_y.unwrap();
+
+        assert!(a < st, "agent({a}) must appear before status({st})");
+        assert!(st < so, "status({st}) must appear before source({so})");
+        assert!(so < p, "source({so}) must appear before path({p})");
+        assert!(p < sp, "path({p}) must appear before step({sp})");
+        assert!(sp < si, "step({sp}) must appear before since({si})");
+    }
+
+    /// source row for a local session: `@local  · via <app>`.
+    #[test]
+    fn peek_source_local_renders() {
+        let detail = make_detail(); // origin="local", host_app="cursor"
+        let buf = render_peek_to_buf(70, 18, &detail);
+        let content: String = (0..18u16)
+            .flat_map(|y| (0..70u16).map(move |x| (x, y)))
+            .map(|(x, y)| cell_symbol(&buf, x, y))
+            .collect();
+        assert!(
+            content.contains("@local"),
+            "source row should contain '@local'"
+        );
+        assert!(
+            content.contains("via Cursor") || content.contains("via cursor"),
+            "source row should contain 'via Cursor'"
+        );
+    }
+
+    /// source row for a remote session: `@<device> · via <app>` (device in cold blue).
+    #[test]
+    fn peek_source_remote_renders() {
+        let mut detail = make_detail();
+        detail.origin = "gpu-rig".to_string();
+        detail.host_app = Some("cursor".to_string());
+        let buf = render_peek_to_buf(70, 18, &detail);
+        let content: String = (0..18u16)
+            .flat_map(|y| (0..70u16).map(move |x| (x, y)))
+            .map(|(x, y)| cell_symbol(&buf, x, y))
+            .collect();
+        assert!(
+            content.contains("@gpu-rig"),
+            "source row should contain '@gpu-rig' for remote"
+        );
+    }
+
+    /// Offline status text: `⊘ offline · remote disconnected`.
+    #[test]
+    fn peek_offline_status_text() {
+        let detail = make_offline_detail(); // stale=true
+        let buf = render_peek_to_buf(70, 18, &detail);
+        let content: String = (0..18u16)
+            .flat_map(|y| (0..70u16).map(move |x| (x, y)))
+            .map(|(x, y)| cell_symbol(&buf, x, y))
+            .collect();
+        assert!(
+            content.contains("offline"),
+            "offline session should show 'offline' in status, got snippet of content"
+        );
+        assert!(
+            content.contains("remote disconnected"),
+            "offline session should show 'remote disconnected'"
+        );
+        assert!(
+            content.contains("⊘"),
+            "offline session should show '⊘' glyph"
+        );
+    }
+
+    /// Offline since shows `last seen` prefix.
+    #[test]
+    fn peek_offline_since_shows_last_seen() {
+        let detail = make_offline_detail();
+        let buf = render_peek_to_buf(70, 18, &detail);
+        let content: String = (0..18u16)
+            .flat_map(|y| (0..70u16).map(move |x| (x, y)))
+            .map(|(x, y)| cell_symbol(&buf, x, y))
+            .collect();
+        assert!(
+            content.contains("last seen"),
+            "offline since field should say 'last seen'"
+        );
+    }
+
+    /// Offline timeline must contain a "lost connection" event.
+    #[test]
+    fn peek_offline_timeline_has_lost_connection() {
+        let detail = make_offline_detail();
+        let buf = render_peek_to_buf(70, 18, &detail);
+        let content: String = (0..18u16)
+            .flat_map(|y| (0..70u16).map(move |x| (x, y)))
+            .map(|(x, y)| cell_symbol(&buf, x, y))
+            .collect();
+        assert!(
+            content.contains("lost connection"),
+            "offline timeline should contain 'lost connection' event"
+        );
+    }
+
+    /// Recent events are shown in reverse-chronological order (newest first).
+    /// The event with ts_secs=8 (newest) must appear above ts_secs=60 (oldest).
+    #[test]
+    fn peek_recent_events_reverse_chron() {
+        let detail = make_detail();
+        let buf = render_peek_to_buf(70, 18, &detail);
+
+        // Find y-coordinate of each event's summary text.
+        let mut y_push: Option<u16> = None; // "git push" — newest (ts=8)
+        let mut y_edited: Option<u16> = None; // "edited 3 files" — middle (ts=40)
+        let mut y_suite: Option<u16> = None; // "ran test suite" — oldest (ts=60)
+
+        for y in 0..18u16 {
+            let row = row_string(&buf, 70, y);
+            if row.contains("git push") && y_push.is_none() {
+                y_push = Some(y);
+            }
+            if row.contains("edited 3 files") && y_edited.is_none() {
+                y_edited = Some(y);
+            }
+            if row.contains("ran test suite") && y_suite.is_none() {
+                y_suite = Some(y);
+            }
+        }
+
+        assert!(y_push.is_some(), "git push event not found");
+        assert!(y_edited.is_some(), "edited 3 files event not found");
+        assert!(y_suite.is_some(), "ran test suite event not found");
+
+        let yp = y_push.unwrap();
+        let ye = y_edited.unwrap();
+        let ys = y_suite.unwrap();
+
+        assert!(
+            yp < ye,
+            "newest 'git push'({yp}) should appear above 'edited'({ye})"
+        );
+        assert!(
+            ye < ys,
+            "'edited'({ye}) should appear above oldest 'ran test suite'({ys})"
+        );
+    }
+
+    /// `step` label must appear (spec §7 renames `action` → `step` in the panel).
+    #[test]
+    fn peek_step_field_label() {
+        let detail = make_detail();
+        let buf = render_peek_to_buf(70, 18, &detail);
+        let content: String = (0..18u16)
+            .flat_map(|y| (0..70u16).map(move |x| (x, y)))
+            .map(|(x, y)| cell_symbol(&buf, x, y))
+            .collect();
+        assert!(
+            content.contains("step"),
+            "peek panel should show 'step' field label per §7"
+        );
+        // The old label "action" must not be present
+        assert!(
+            !content.contains("action"),
+            "peek panel should NOT show old 'action' label, use 'step'"
+        );
     }
 }

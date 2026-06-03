@@ -5,6 +5,7 @@
 //! ~16 fps, fetching sessions from the daemon each tick.
 
 pub mod anim;
+pub mod bg_detect;
 pub mod client;
 pub mod layout;
 pub mod peek;
@@ -32,9 +33,10 @@ use crate::jump::{JumpOutcome, jump};
 use crate::protocol::SessionDetail;
 use crate::sock;
 use anim::Anim;
-use layout::{PeekPlacement, peek_placement, split_for_inline_peek, visible_window};
+use layout::{PeekPlacement, peek_placement, split_for_inline_peek};
 use render::{RenderState, render_frame};
 use settings::{Cursor as SettingsCursor, Dir as SettingsDir};
+use bg_detect::{border_color_for_bg, detect_light_background};
 use theme::Theme;
 use viewmodel::{Selection, group_and_sort, total_rows};
 
@@ -85,13 +87,19 @@ pub fn run_tui() -> Result<()> {
     let _ = sock::ensure_daemon();
 
     let _guard = TermGuard::enter()?;
+
+    // Detect terminal background once, in raw mode, before the alt-screen
+    // fills the display.  Falls back to dark (DarkGray border) on any error.
+    let is_light_bg = detect_light_background();
+    let border_color = border_color_for_bg(is_light_bg);
+
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
     // ── State ─────────────────────────────────────────────────────────────
     let anim = Anim::new();
-    let theme = Theme::classic();
+    let theme = Theme::classic_with_border(border_color);
     let mut selection = Selection::new();
     let mut sessions = vec![];
     let mut daemon_ready = false;
@@ -119,6 +127,10 @@ pub fn run_tui() -> Result<()> {
     let mut settings_scroll: usize = 0;
     let mut settings_cfg = config::Config::default();
     let mut settings_cursor = SettingsCursor::default();
+
+    // Accent color loaded once at startup; changing settings.json requires a
+    // TUI restart to take effect (acceptable: users edit the file directly).
+    let accent = config::load().accent_color();
 
     // Jump status: message shown in footer + timestamp for auto-clear
     let mut jump_status: Option<String> = None;
@@ -203,39 +215,12 @@ pub fn run_tui() -> Result<()> {
             selection.clamp(n_rows);
         }
 
-        // Compute scroll window
-        let sel_idx = selection.index.unwrap_or(0);
         let terminal_size = terminal.size()?;
         let terminal_height = terminal_size.height;
         let terminal_width = terminal_size.width;
 
         // Determine peek placement mode
         let placement = peek_placement(terminal_height);
-
-        // The list area height depends on whether peek is open and its placement.
-        let list_area_height = if peek_open {
-            match placement {
-                PeekPlacement::Inline => terminal_height / 2,
-                PeekPlacement::FullScreen => 0, // list hidden
-            }
-        } else {
-            terminal_height
-        };
-
-        // Dynamic viewport height: subtract header (1) + footer (1) + actual group-header rows.
-        // In Critical mode, non-NEEDS-INPUT groups don't get a header row.
-        let height_prof = layout::height_profile(list_area_height);
-        let is_critical = matches!(height_prof, layout::HeightProfile::Critical);
-        let group_header_rows = if is_critical {
-            // Only NEEDS INPUT group renders a header
-            groups.iter().filter(|g| g.title == "NEEDS INPUT").count()
-        } else {
-            groups.len()
-        };
-        let body_h = list_area_height
-            .saturating_sub(2) // header + footer
-            .saturating_sub(group_header_rows as u16) as usize;
-        let (scroll_offset, _) = visible_window(n_rows, sel_idx, body_h.max(1));
 
         // Draw
         // Auto-clear jump status after JUMP_STATUS_DURATION
@@ -320,7 +305,7 @@ pub fn run_tui() -> Result<()> {
                             daemon_ready,
                             anim: &anim,
                             theme: &theme,
-                            scroll_offset,
+                            accent,
                             peek_open: true,
                             jump_status: jump_status_snap,
                         };
@@ -357,7 +342,7 @@ pub fn run_tui() -> Result<()> {
                     daemon_ready,
                     anim: &anim,
                     theme: &theme,
-                    scroll_offset,
+                    accent,
                     peek_open: false,
                     jump_status: jump_status_snap,
                 };

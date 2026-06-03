@@ -37,12 +37,17 @@ pub fn spinner_frame_ascii(elapsed: f64) -> &'static str {
 const BREATHE_PERIOD: f64 = 1.4; // 1.4 s ease-in-out cycle
 
 /// Return a brightness value in [0.0, 1.0] for the Approval breathing animation.
-/// Uses a half-cosine wave for ease-in-out feel.
+/// Uses a triangle wave: linearly rises from 0→1 in the first half-period,
+/// then linearly falls from 1→0 in the second half-period.
 pub fn breathe(elapsed: f64) -> f32 {
     let phase = (elapsed % BREATHE_PERIOD) / BREATHE_PERIOD; // 0..1
-    // Half-cosine: 0→1→0 (smooth)
-    // cos(2π·phase) goes 1→−1→1; remap to 0→1→0
-    let t = (1.0 - (2.0 * std::f64::consts::PI * phase).cos()) / 2.0;
+    // Triangle wave: rising half [0, 0.5) → t = phase * 2;
+    //                falling half [0.5, 1) → t = (1 - phase) * 2
+    let t = if phase < 0.5 {
+        phase * 2.0
+    } else {
+        (1.0 - phase) * 2.0
+    };
     t as f32
 }
 
@@ -246,6 +251,50 @@ mod tests {
             let b = breathe(t);
             assert!((0.0..=1.0).contains(&b), "breathe({t}) = {b} out of range");
         }
+    }
+
+    /// Triangle wave: rising half is perfectly linear (0→1 from t=0 to t=T/2).
+    #[test]
+    fn breathe_triangle_wave_rising_half_is_linear() {
+        // At 25% of period, triangle wave should be exactly 0.5.
+        let t25 = BREATHE_PERIOD * 0.25;
+        let b = breathe(t25);
+        assert!(
+            (b - 0.5).abs() < 0.01,
+            "at 25% period, triangle wave should be ~0.5, got {b}"
+        );
+    }
+
+    /// Triangle wave: falling half is perfectly linear (1→0 from t=T/2 to t=T).
+    #[test]
+    fn breathe_triangle_wave_falling_half_is_linear() {
+        // At 75% of period, triangle wave should be exactly 0.5.
+        let t75 = BREATHE_PERIOD * 0.75;
+        let b = breathe(t75);
+        assert!(
+            (b - 0.5).abs() < 0.01,
+            "at 75% period, triangle wave should be ~0.5, got {b}"
+        );
+    }
+
+    /// Triangle wave: midpoint of rising half (12.5%) should be 0.25.
+    #[test]
+    fn breathe_triangle_wave_quarter_point_is_0_25() {
+        let t125 = BREATHE_PERIOD * 0.125;
+        let b = breathe(t125);
+        assert!(
+            (b - 0.25).abs() < 0.01,
+            "at 12.5% period, triangle wave should be ~0.25, got {b}"
+        );
+    }
+
+    /// Triangle wave: wraps cleanly — at period start and period end both = 0.
+    #[test]
+    fn breathe_triangle_wave_wraps_to_zero() {
+        let b_start = breathe(0.0);
+        let b_end = breathe(BREATHE_PERIOD);
+        assert!(b_start.abs() < 0.01, "triangle start should be ~0, got {b_start}");
+        assert!(b_end.abs() < 0.01, "triangle end should be ~0, got {b_end}");
     }
 
     // ── heartbeat ────────────────────────────────────────────────────────
