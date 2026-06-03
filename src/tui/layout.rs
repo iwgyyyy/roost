@@ -683,8 +683,13 @@ pub fn card_layout_v2(width: u16, session: &crate::protocol::SessionView) -> Car
                 session.activity.clone().unwrap_or_default()
             }
             _ => {
-                // Idle / Done: show done summary (last_prompt).
-                session.last_prompt.clone().unwrap_or_default()
+                // Idle / Done: show done summary (last_prompt). A fresh session
+                // that has never received a prompt falls back to a placeholder
+                // so the step line is never blank.
+                session
+                    .last_prompt
+                    .clone()
+                    .unwrap_or_else(|| "New session".to_string())
             }
         }
     };
@@ -1476,6 +1481,19 @@ mod tests {
         assert!(
             cl.step_text.contains("Fix the auth bug"),
             "idle should show last_prompt in step_text, got: {:?}",
+            cl.step_text
+        );
+        assert_eq!(cl.step_prefix, "▸");
+    }
+
+    #[test]
+    fn v2_step_idle_without_prompt_falls_back_to_new_session() {
+        // Fresh session_start: idle, no last_prompt and no activity yet.
+        let s = make_v2_session("idle", None, 0, 0, "local", false);
+        let cl = card_layout_v2(80, &s);
+        assert!(
+            cl.step_text.contains("New session"),
+            "idle with no prompt should fall back to 'New session', got: {:?}",
             cl.step_text
         );
         assert_eq!(cl.step_prefix, "▸");
