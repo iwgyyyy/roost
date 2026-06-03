@@ -68,6 +68,7 @@ fn hook_sends_session_start_event() {
         }
         Request::List => panic!("expected Report, got List"),
         Request::Detail { .. } => panic!("expected Report, got Detail"),
+        _ => panic!("expected Report, got a fleet request variant"),
     }
 }
 

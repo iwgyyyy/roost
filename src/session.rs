@@ -163,6 +163,9 @@ pub fn is_waiting(state: &AgentState) -> bool {
 #[derive(Debug)]
 pub struct AgentSession {
     pub id: String,
+    /// The machine origin this session belongs to. `None` in the `HookEvent`
+    /// is normalised to `"local"` at construction time.
+    pub origin: String,
     pub family: AgentFamily,
     pub name: String,
     pub cwd: String,
@@ -180,6 +183,14 @@ pub struct AgentSession {
     /// is open and awaiting the user's answer. Used to stop a follow-up generic
     /// "needs your permission" notification from overwriting the question text.
     pub awaiting_clarify: bool,
+
+    /// Whether this session is stale (tunnel disconnected). While stale:
+    /// - busy timer is frozen (active_since is snapshotted into active_accum,
+    ///   active_since set to None — same mechanics as Done/Idle freeze).
+    /// - state is preserved as-is for display.
+    ///
+    /// Cleared when the next hook event arrives (tunnel reconnected).
+    pub stale: bool,
 
     // ── Busy timer: cumulative active duration ────────────────────────────
     /// Total accumulated active duration across all completed active segments.
@@ -227,6 +238,12 @@ impl AgentSession {
     pub fn new(ev: &HookEvent) -> Self {
         AgentSession {
             id: ev.session_id.clone(),
+            origin: ev
+                .origin
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("local")
+                .to_string(),
             family: ev.family.clone(),
             name: String::new(), // filled by daemon via naming::resolve_name
             cwd: ev.cwd.clone(),
@@ -241,6 +258,7 @@ impl AgentSession {
             events: VecDeque::with_capacity(MAX_EVENTS),
             edit_count: 0,
             awaiting_clarify: false,
+            stale: false,
             active_accum: Duration::ZERO,
             active_since: None,
             last_prompt_at: None,
@@ -267,8 +285,7 @@ impl AgentSession {
 
     /// Cumulative active ("busy") duration: the accumulator plus the current
     /// active segment if one is open. When the session is not active (Done /
-    /// Idle), `active_since` is `None`, so this value is frozen — it stops
-    /// counting and resumes only when the session becomes active again.
+    /// Idle / stale), `active_since` is `None`, so this value is frozen.
     pub fn busy_duration(&self, now: Instant) -> Duration {
         match self.active_since {
             Some(since) => self.active_accum + now.duration_since(since),
@@ -276,10 +293,45 @@ impl AgentSession {
         }
     }
 
+    /// Freeze this session as stale (tunnel disconnected).
+    ///
+    /// Snapshots the busy timer (active_accum += elapsed; active_since = None),
+    /// identical to the Done/Idle freeze mechanics, so the displayed busy time
+    /// stops counting while the remote is unreachable.
+    pub fn freeze_stale(&mut self, now: Instant) {
+        if !self.stale {
+            // Freeze the busy timer in the same way Done/Idle does.
+            if let Some(since) = self.active_since.take() {
+                self.active_accum += now.duration_since(since);
+            }
+            self.stale = true;
+        }
+    }
+
+    /// Unfreeze a stale session when a new hook event arrives (tunnel reconnected).
+    ///
+    /// Resumes the busy timer if the session is currently in an active state.
+    /// Clears the stale flag so the next liveness tick no longer sees it as frozen.
+    pub fn unfreeze_stale(&mut self, now: Instant) {
+        if self.stale {
+            self.stale = false;
+            // Resume the busy timer if the session is currently active.
+            if is_active(&self.state) {
+                self.active_since = Some(now);
+            }
+        }
+    }
+
     /// Apply a hook event to this session. Returns true if the session should be removed.
     pub fn apply(&mut self, ev: &HookEvent) -> bool {
         let now = Instant::now();
         let now_wall = SystemTime::now();
+
+        // A new event clears the stale flag (tunnel reconnected / session active again).
+        // This must happen before the busy-timer logic so the resumed segment starts
+        // from the correct instant.
+        self.unfreeze_stale(now);
+
         // Attribute the just-elapsed inter-event gap to the state we held during
         // it, into the currently open turn: busy time while active, wait time
         // while waiting on the user. This "charge the gap to the prior state"
@@ -304,6 +356,23 @@ impl AgentSession {
         // Update pid if provided
         if let Some(p) = ev.pid {
             self.pid = Some(p);
+        }
+
+        // Update cwd and name on every event (agent may have cd'd).
+        // Only update when the event carries a non-empty cwd to avoid
+        // clearing the value with hook events that omit the field.
+        if !ev.cwd.is_empty() {
+            self.cwd = ev.cwd.clone();
+            // name = last path component (basename).
+            let basename = ev
+                .cwd
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(&ev.cwd);
+            if !basename.is_empty() {
+                self.name = basename.to_string();
+            }
         }
 
         // Update jump locator fields when provided (prefer first non-None value;
@@ -726,6 +795,7 @@ mod tests {
             workspace_path: None,
             codex_thread_id: None,
             pane_title: None,
+            origin: None,
         }
     }
 
@@ -1010,6 +1080,7 @@ mod tests {
             workspace_path: None,
             codex_thread_id: None,
             pane_title: None,
+            origin: None,
         }
     }
 
@@ -1208,6 +1279,7 @@ mod tests {
             workspace_path: None,
             codex_thread_id: None,
             pane_title: None,
+            origin: None,
         }
     }
 
@@ -1432,9 +1504,9 @@ mod tests {
 
     #[test]
     fn turn_closes_on_stop_with_busy_time() {
+        // make_event sets cwd = "/tmp/project"; after apply the name becomes "project".
         let start = make_event(EventKind::SessionStart);
         let mut s = AgentSession::new(&start);
-        s.name = "proj".to_string();
         s.apply(&start);
 
         s.apply(&make_event(EventKind::UserPromptSubmit));
@@ -1455,7 +1527,8 @@ mod tests {
             "busy should include the 5s active gap, got {}",
             ct.busy_secs
         );
-        assert_eq!(ct.name, "proj");
+        // name is derived from cwd basename ("/tmp/project" → "project").
+        assert_eq!(ct.name, "project");
     }
 
     #[test]
@@ -1564,5 +1637,214 @@ mod tests {
             .expect("an open turn should flush on removal");
         assert!(ct.incomplete, "a removal-flush is marked incomplete");
         assert!(!s.turn_open);
+    }
+
+    // ── Stale freeze/unfreeze tests (Task A7) ─────────────────────────────────
+
+    /// freeze_stale on a Working session freezes the busy timer (active_since → None,
+    /// active_accum captures the elapsed time) and sets stale=true.
+    #[test]
+    fn freeze_stale_freezes_busy_timer() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        s.apply(&make_event(EventKind::UserPromptSubmit));
+        assert_eq!(s.state, AgentState::Working);
+        assert!(s.active_since.is_some(), "should be active before freeze");
+
+        // Simulate 5s of active time.
+        let t0 = Instant::now() - Duration::from_secs(5);
+        s.active_since = Some(t0);
+
+        let now = Instant::now();
+        s.freeze_stale(now);
+
+        assert!(s.stale, "session should be stale after freeze");
+        assert!(s.active_since.is_none(), "active_since should be frozen (None)");
+        assert!(
+            s.active_accum >= Duration::from_secs(5),
+            "active_accum should capture the elapsed time, got {:?}",
+            s.active_accum
+        );
+    }
+
+    /// freeze_stale is idempotent: calling it twice does not double-count time.
+    #[test]
+    fn freeze_stale_is_idempotent() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        s.apply(&make_event(EventKind::UserPromptSubmit));
+
+        let t0 = Instant::now() - Duration::from_secs(5);
+        s.active_since = Some(t0);
+
+        let now = Instant::now();
+        s.freeze_stale(now);
+        let accum_after_first = s.active_accum;
+
+        // Calling again with a later `now` must not add more time.
+        s.freeze_stale(now + Duration::from_secs(10));
+        assert_eq!(
+            s.active_accum, accum_after_first,
+            "second freeze must not double-count"
+        );
+    }
+
+    /// unfreeze_stale on an active state resumes the busy timer (active_since = Some).
+    #[test]
+    fn unfreeze_stale_resumes_busy_timer_when_active() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        s.apply(&make_event(EventKind::UserPromptSubmit));
+        assert_eq!(s.state, AgentState::Working);
+
+        // Freeze.
+        let now = Instant::now();
+        s.freeze_stale(now);
+        assert!(s.stale);
+        assert!(s.active_since.is_none());
+
+        // Unfreeze.
+        let now2 = now + Duration::from_millis(100);
+        s.unfreeze_stale(now2);
+        assert!(!s.stale, "stale should be cleared after unfreeze");
+        assert!(
+            s.active_since.is_some(),
+            "active_since should be resumed because state=Working"
+        );
+    }
+
+    /// unfreeze_stale on a paused state (Done) does NOT restart the busy timer.
+    #[test]
+    fn unfreeze_stale_does_not_resume_timer_when_paused() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        s.apply(&make_event(EventKind::UserPromptSubmit));
+        s.apply(&make_event(EventKind::Stop));
+        assert_eq!(s.state, AgentState::Done);
+        assert!(s.active_since.is_none());
+
+        // Force stale even though Done.
+        let now = Instant::now();
+        s.stale = true;
+        s.unfreeze_stale(now);
+
+        assert!(!s.stale);
+        assert!(
+            s.active_since.is_none(),
+            "Done session must not restart timer on unfreeze"
+        );
+    }
+
+    /// apply() clears stale flag and resumes busy timer (integration of unfreeze).
+    #[test]
+    fn apply_clears_stale_and_resumes_busy() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        s.apply(&make_event(EventKind::UserPromptSubmit));
+
+        // Freeze manually.
+        s.freeze_stale(Instant::now());
+        assert!(s.stale);
+        assert!(s.active_since.is_none());
+        let accum_frozen = s.active_accum;
+
+        // Receive a new event → stale cleared, busy timer resumed.
+        let mut ev = make_event(EventKind::PreToolUse);
+        ev.tool_name = Some("Bash".to_string());
+        ev.tool_input = Some(r#"{"command":"ls"}"#.to_string());
+        s.apply(&ev);
+
+        assert!(!s.stale, "apply should clear stale");
+        assert!(
+            s.active_since.is_some(),
+            "busy timer should resume after apply on Working session"
+        );
+        // active_accum must not be less than what was frozen.
+        assert!(
+            s.active_accum >= accum_frozen,
+            "active_accum should not decrease"
+        );
+    }
+
+    // ── cwd/name live-update tests ─────────────────────────────────────────────
+
+    /// apply() with a new non-empty cwd updates both cwd and name (末段).
+    #[test]
+    fn apply_updates_cwd_and_name_on_each_event() {
+        let mut start = make_event(EventKind::SessionStart);
+        start.cwd = "/home/user/alpha".to_string();
+        let mut s = AgentSession::new(&start);
+        s.name = "alpha".to_string(); // simulates daemon naming
+        s.apply(&start);
+        assert_eq!(s.cwd, "/home/user/alpha");
+
+        // Agent cd'd to a new directory — next event carries the new cwd.
+        let mut ev = make_event(EventKind::PreToolUse);
+        ev.cwd = "/home/user/beta".to_string();
+        ev.tool_name = Some("Bash".to_string());
+        ev.tool_input = Some(r#"{"command":"ls"}"#.to_string());
+        s.apply(&ev);
+
+        assert_eq!(s.cwd, "/home/user/beta", "cwd must be updated to the latest event's cwd");
+        assert_eq!(s.name, "beta", "name must reflect the new cwd basename");
+    }
+
+    /// apply() with an empty cwd does NOT clear the existing cwd.
+    #[test]
+    fn apply_empty_cwd_does_not_clear_existing() {
+        let mut start = make_event(EventKind::SessionStart);
+        start.cwd = "/home/user/project".to_string();
+        let mut s = AgentSession::new(&start);
+        s.name = "project".to_string();
+        s.apply(&start);
+
+        let mut ev = make_event(EventKind::Stop);
+        ev.cwd = String::new(); // empty — should be ignored
+        s.apply(&ev);
+
+        assert_eq!(s.cwd, "/home/user/project", "empty cwd must not clear existing cwd");
+        assert_eq!(s.name, "project", "name must not change when cwd is empty");
+    }
+
+    /// apply() updates name to the final path component (handles trailing slashes).
+    #[test]
+    fn apply_cwd_basename_extracted_correctly() {
+        let mut start = make_event(EventKind::SessionStart);
+        start.cwd = "/tmp".to_string();
+        let mut s = AgentSession::new(&start);
+        s.name = "tmp".to_string();
+        s.apply(&start);
+
+        let mut ev = make_event(EventKind::UserPromptSubmit);
+        ev.cwd = "/Users/dev/my-project".to_string();
+        s.apply(&ev);
+
+        assert_eq!(s.name, "my-project");
+        assert_eq!(s.cwd, "/Users/dev/my-project");
+    }
+
+    /// busy_duration is frozen while stale (does not advance with now).
+    #[test]
+    fn busy_duration_frozen_while_stale() {
+        let start = make_event(EventKind::SessionStart);
+        let mut s = AgentSession::new(&start);
+        s.apply(&start);
+        s.apply(&make_event(EventKind::UserPromptSubmit));
+
+        // Set a known accum, then freeze.
+        s.active_accum = Duration::from_secs(100);
+        s.active_since = None; // already frozen by freeze_stale or Done transition
+        s.stale = true;
+
+        let base = Instant::now();
+        let d1 = s.busy_duration(base);
+        let d2 = s.busy_duration(base + Duration::from_secs(30));
+        assert_eq!(d1, d2, "busy_duration must not advance while stale (frozen)");
+        assert_eq!(d1, Duration::from_secs(100));
     }
 }

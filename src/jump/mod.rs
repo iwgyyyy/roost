@@ -79,6 +79,8 @@ pub enum JumpStrategy {
     OpenDir { path: String },
     /// No usable strategy.
     Unsupported,
+    /// Session is running on a remote host; local focus is not possible.
+    RemoteUnsupported { origin: String },
 }
 
 // ── plan_jump ─────────────────────────────────────────────────────────────────
@@ -90,6 +92,13 @@ pub enum JumpStrategy {
 /// and returns the *best available* strategy. Execution is separate.
 pub fn plan_jump(target: &JumpTarget) -> JumpStrategy {
     use crate::jump::target::HostCategory;
+
+    // Remote sessions cannot be focused from this machine.
+    if target.origin != "local" {
+        return JumpStrategy::RemoteUnsupported {
+            origin: target.origin.clone(),
+        };
+    }
 
     let descriptor = descriptor_for(&target.host);
     let category = descriptor
@@ -344,6 +353,11 @@ fn execute_strategy(
         JumpStrategy::Unsupported => JumpOutcome::Unsupported {
             message: format!("Jump not supported for host '{}'", target.host),
         },
+        JumpStrategy::RemoteUnsupported { ref origin } => JumpOutcome::Unsupported {
+            message: format!(
+                "agent on {origin} — SSH into {origin} to interact with this session"
+            ),
+        },
     }
 }
 
@@ -485,6 +499,7 @@ mod tests {
             codex_thread_id: Some("thread-abc".to_string()),
             pane_title: None,
             cwd: "/home/user/project".to_string(),
+            origin: "local".to_string(),
         }
     }
 
@@ -748,6 +763,67 @@ mod tests {
         assert!(
             matches!(outcome, JumpOutcome::Unsupported { .. }),
             "expected Unsupported, got: {outcome:?}"
+        );
+    }
+
+    // ── Remote origin degradation tests ────────────────────────────────────
+
+    #[test]
+    fn plan_jump_remote_origin_gives_remote_unsupported_strategy() {
+        // Any well-known host on a remote origin should degrade before any
+        // platform-specific path is attempted.
+        for host in &["ghostty", "tmux", "cursor", "codex", "warp"] {
+            let mut t = make_target(host);
+            t.origin = "devbox1".to_string();
+            let s = plan_jump(&t);
+            assert!(
+                matches!(s, JumpStrategy::RemoteUnsupported { .. }),
+                "host={host}: expected RemoteUnsupported, got: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_jump_local_origin_not_degraded() {
+        // Local sessions must continue to walk the normal strategy ladder.
+        let t = make_target("ghostty"); // origin = "local"
+        let s = plan_jump(&t);
+        assert!(
+            matches!(s, JumpStrategy::AppleScript { .. }),
+            "expected AppleScript for local ghostty, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn jump_remote_origin_returns_unsupported_outcome_with_hint() {
+        let mut t = make_target("ghostty");
+        t.origin = "devbox1".to_string();
+        let exec = MockExecutor::new_succeed_all();
+        let outcome = jump(&t, &exec);
+        // Must be Unsupported (not Focused / Activated / etc.)
+        assert!(
+            matches!(outcome, JumpOutcome::Unsupported { .. }),
+            "expected Unsupported, got: {outcome:?}"
+        );
+        // Message must name the remote host so the user knows where to SSH.
+        let msg = outcome.message();
+        assert!(
+            msg.contains("devbox1"),
+            "message should mention the remote origin 'devbox1'; got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn jump_remote_origin_does_not_invoke_executor() {
+        // No OS-level calls must happen for a remote session.
+        let mut t = make_target("ghostty");
+        t.origin = "devbox1".to_string();
+        let exec = MockExecutor::new_succeed_all();
+        let _outcome = jump(&t, &exec);
+        let calls = exec.recorded_calls();
+        assert!(
+            calls.is_empty(),
+            "expected zero executor calls for remote session, got: {calls:?}"
         );
     }
 }

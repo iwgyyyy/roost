@@ -122,6 +122,7 @@ mod tests {
                 id: "s1".to_string(),
                 family: AgentFamily::Claude,
                 name: "my-repo".to_string(),
+                cwd: String::new(),
                 state: "working".to_string(),
                 activity: Some("思考中…".to_string()),
                 last_activity_secs: 5,
@@ -138,11 +139,14 @@ mod tests {
                 workspace_path: None,
                 codex_thread_id: None,
                 pane_title: None,
+                origin: "local".to_string(),
+                stale: false,
             },
             SessionView {
                 id: "s2".to_string(),
                 family: AgentFamily::Codex,
                 name: "another-repo".to_string(),
+                cwd: String::new(),
                 state: "done".to_string(),
                 activity: None,
                 last_activity_secs: 120,
@@ -159,6 +163,8 @@ mod tests {
                 workspace_path: None,
                 codex_thread_id: None,
                 pane_title: None,
+                origin: "local".to_string(),
+                stale: false,
             },
         ];
         print_sessions(&views);

@@ -257,6 +257,9 @@ pub struct JumpTarget {
     pub pane_title: Option<String>,
     /// Working directory (used as workspace_path fallback for editors).
     pub cwd: String,
+    /// Origin of the session: `"local"` for local sessions, or a remote name
+    /// (e.g. `"devbox1"`) for sessions running on a remote host.
+    pub origin: String,
 }
 
 impl JumpTarget {
@@ -276,6 +279,7 @@ impl JumpTarget {
             codex_thread_id: sv.codex_thread_id.clone(),
             pane_title: sv.pane_title.clone(),
             cwd: String::new(), // SessionView doesn't expose cwd; fill at jump call site
+            origin: sv.origin.clone(),
         }
     }
 }
@@ -292,6 +296,7 @@ mod tests {
             id: "s1".to_string(),
             family: AgentFamily::Claude,
             name: "repo".to_string(),
+            cwd: String::new(),
             state: "working".to_string(),
             activity: None,
             last_activity_secs: 0,
@@ -308,6 +313,8 @@ mod tests {
             workspace_path: Some("/home/user/project".to_string()),
             codex_thread_id: Some("thread-1".to_string()),
             pane_title: Some("claude".to_string()),
+            origin: "local".to_string(),
+            stale: false,
         }
     }
 
@@ -334,6 +341,21 @@ mod tests {
         sv.host_app = None;
         let t = JumpTarget::from_session_view(&sv);
         assert_eq!(t.host, "unknown");
+    }
+
+    #[test]
+    fn jump_target_from_session_view_carries_local_origin() {
+        let sv = sv_with_host("ghostty"); // sv_with_host sets origin = "local"
+        let t = JumpTarget::from_session_view(&sv);
+        assert_eq!(t.origin, "local");
+    }
+
+    #[test]
+    fn jump_target_from_session_view_carries_remote_origin() {
+        let mut sv = sv_with_host("ghostty");
+        sv.origin = "devbox1".to_string();
+        let t = JumpTarget::from_session_view(&sv);
+        assert_eq!(t.origin, "devbox1");
     }
 
     // ── normalize_host_name ────────────────────────────────────────────────

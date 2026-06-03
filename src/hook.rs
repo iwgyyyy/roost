@@ -52,10 +52,44 @@ where
     Some(direct_parent)
 }
 
+/// Resolve the socket path and origin label from flag/env/default.
+///
+/// Priority for each:
+///   1. `flag_sock` / `flag_origin`  (explicit CLI flag)
+///   2. `env_sock` / `env_origin`    (environment variable `ROOST_SOCK` / `ROOST_ORIGIN`)
+///   3. default socket path via `sock::socket_path()` / `None` for origin
+///
+/// This function is pure (no side-effects) and injectable for testing.
+pub fn resolve_sock_and_origin(
+    flag_sock: Option<String>,
+    flag_origin: Option<String>,
+    env_sock: Option<String>,
+    env_origin: Option<String>,
+) -> (std::path::PathBuf, Option<String>) {
+    let path = if let Some(s) = flag_sock {
+        std::path::PathBuf::from(s)
+    } else if let Some(s) = env_sock {
+        std::path::PathBuf::from(s)
+    } else {
+        sock::socket_path()
+    };
+
+    let origin = flag_origin.or(env_origin);
+
+    (path, origin)
+}
+
 /// Run the hook subcommand: read stdin JSON, build HookEvent, send to daemon.
 /// family: "claude" | "codex"
 /// event_name: e.g. "SessionStart", "PreToolUse", etc.
-pub fn run_hook(family: &str, event_name: &str) -> Result<()> {
+/// sock_override: explicit socket path (from `--sock` flag), overrides env+default.
+/// origin_override: explicit origin label (from `--origin` flag), overrides env+default.
+pub fn run_hook(
+    family: &str,
+    event_name: &str,
+    sock_override: Option<String>,
+    origin_override: Option<String>,
+) -> Result<()> {
     // CodeWhale (DeepSeek) delivers all context via DEEPSEEK_* env vars and runs
     // session_start synchronously from its raw-mode TUI, leaving the hook's stdin
     // attached to the terminal (which never sends EOF). Reading it would block
@@ -65,9 +99,13 @@ pub fn run_hook(family: &str, event_name: &str) -> Result<()> {
     } else {
         read_stdin()?
     };
-    let event = build_hook_event(family, event_name, &stdin_data)?;
 
-    let path = sock::socket_path();
+    // Resolve sock + origin: flag > env > default.
+    let env_sock = std::env::var("ROOST_SOCK").ok().filter(|s| !s.is_empty());
+    let env_origin = std::env::var("ROOST_ORIGIN").ok().filter(|s| !s.is_empty());
+    let (path, origin) = resolve_sock_and_origin(sock_override, origin_override, env_sock, env_origin);
+
+    let event = build_hook_event_with_origin(family, event_name, &stdin_data, origin)?;
 
     // Use connect_hook: write_timeout=200ms, no read_timeout — never block the agent
     let mut stream = match sock::connect_hook(&path) {
@@ -321,6 +359,20 @@ fn read_stdin() -> Result<String> {
     Ok(buf)
 }
 
+/// Build a HookEvent from the family string, event name string, raw stdin JSON,
+/// and an optional origin label. The origin is written into `HookEvent::origin`
+/// so the daemon can later tag sessions with their source machine.
+pub fn build_hook_event_with_origin(
+    family: &str,
+    event_name: &str,
+    stdin_json: &str,
+    origin: Option<String>,
+) -> Result<HookEvent> {
+    let mut ev = build_hook_event(family, event_name, stdin_json)?;
+    ev.origin = origin;
+    Ok(ev)
+}
+
 /// Build a HookEvent from the family string, event name string, and raw stdin JSON.
 pub fn build_hook_event(family: &str, event_name: &str, stdin_json: &str) -> Result<HookEvent> {
     let family = parse_family(family);
@@ -498,6 +550,7 @@ pub fn build_hook_event(family: &str, event_name: &str, stdin_json: &str) -> Res
         workspace_path,
         codex_thread_id,
         pane_title,
+        origin: None,
     })
 }
 
@@ -1041,5 +1094,69 @@ mod tests {
             loc.terminal_tty, None,
             "terminal_tty should be None when no env and no fd tty"
         );
+    }
+
+    // ── resolve_sock_and_origin tests (Task A1) ────────────────────────────────
+
+    /// flag > env > default priority for sock path.
+    #[test]
+    fn resolve_sock_flag_wins_over_env() {
+        let flag = Some("/flag/path.sock".to_string());
+        let env_val = Some("/env/path.sock".to_string());
+        let (sock, _) = resolve_sock_and_origin(flag, None, env_val, None);
+        // flag value must win
+        assert_eq!(sock.to_string_lossy(), "/flag/path.sock");
+    }
+
+    #[test]
+    fn resolve_sock_env_wins_over_default_when_no_flag() {
+        let env_val = Some("/env/path.sock".to_string());
+        let (sock, _) = resolve_sock_and_origin(None, None, env_val, None);
+        assert_eq!(sock.to_string_lossy(), "/env/path.sock");
+    }
+
+    #[test]
+    fn resolve_sock_default_when_neither_flag_nor_env() {
+        let (sock, _) = resolve_sock_and_origin(None, None, None, None);
+        // default is whatever sock::socket_path() returns — we just check it's non-empty
+        assert!(!sock.to_string_lossy().is_empty());
+    }
+
+    /// flag > env > None for origin.
+    #[test]
+    fn resolve_origin_flag_wins_over_env() {
+        let flag = Some("flag-origin".to_string());
+        let env_val = Some("env-origin".to_string());
+        let (_, origin) = resolve_sock_and_origin(None, flag, None, env_val);
+        assert_eq!(origin.as_deref(), Some("flag-origin"));
+    }
+
+    #[test]
+    fn resolve_origin_env_wins_over_none_when_no_flag() {
+        let env_val = Some("env-origin".to_string());
+        let (_, origin) = resolve_sock_and_origin(None, None, None, env_val);
+        assert_eq!(origin.as_deref(), Some("env-origin"));
+    }
+
+    #[test]
+    fn resolve_origin_none_when_neither_flag_nor_env() {
+        let (_, origin) = resolve_sock_and_origin(None, None, None, None);
+        assert_eq!(origin, None);
+    }
+
+    /// build_hook_event carries origin when provided.
+    #[test]
+    fn build_hook_event_carries_origin() {
+        let json = r#"{"session_id":"s1","cwd":"/tmp"}"#;
+        let ev = build_hook_event_with_origin("claude", "SessionStart", json, Some("devbox1".to_string())).unwrap();
+        assert_eq!(ev.origin.as_deref(), Some("devbox1"));
+    }
+
+    /// build_hook_event with no origin yields None.
+    #[test]
+    fn build_hook_event_origin_none_when_not_provided() {
+        let json = r#"{"session_id":"s1","cwd":"/tmp"}"#;
+        let ev = build_hook_event_with_origin("claude", "SessionStart", json, None).unwrap();
+        assert_eq!(ev.origin, None);
     }
 }

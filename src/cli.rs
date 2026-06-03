@@ -19,6 +19,12 @@ pub enum Commands {
         family: String,
         /// Hook event name (e.g. SessionStart, PreToolUse)
         event: String,
+        /// Override the roost daemon socket path (default: auto-detected; env: ROOST_SOCK)
+        #[arg(long)]
+        sock: Option<String>,
+        /// Tag this event with a source-machine label (env: ROOST_ORIGIN)
+        #[arg(long)]
+        origin: Option<String>,
     },
     /// Run the background daemon
     Daemon,
@@ -27,11 +33,36 @@ pub enum Commands {
         /// Remove roost hooks instead of installing
         #[arg(long)]
         uninstall: bool,
+        /// Bake a custom daemon socket path into generated hook commands
+        /// (for remote agents that forward events back to a hub machine)
+        #[arg(long)]
+        sock: Option<String>,
+        /// Bake a machine label into generated hook commands (e.g. "devbox1")
+        #[arg(long)]
+        origin: Option<String>,
     },
     /// List currently tracked agent sessions
     List,
     /// Update roost to the latest release (installs from the install script only)
     Update,
+    /// Add a remote dev box to the roost fleet
+    Add {
+        /// SSH target, e.g. `user@devbox1` or `10.0.0.5`
+        target: String,
+        /// Human-readable label for this machine (defaults to the host part of <target>)
+        #[arg(long)]
+        origin: Option<String>,
+    },
+    /// Remove a remote dev box from the roost fleet
+    Remove {
+        /// SSH target (`user@host`) or origin label identifying the remote to remove
+        key: String,
+        /// Also delete the roost binary from the remote machine
+        #[arg(long)]
+        purge: bool,
+    },
+    /// List all registered remote machines and their tunnel status
+    Remotes,
 }
 
 pub fn run() -> Result<()> {
@@ -42,9 +73,18 @@ pub fn run() -> Result<()> {
             maybe_prompt_setup();
             roost::tui::run_tui()
         }
-        Some(Commands::Hook { family, event }) => roost::hook::run_hook(&family, &event),
+        Some(Commands::Hook {
+            family,
+            event,
+            sock,
+            origin,
+        }) => roost::hook::run_hook(&family, &event, sock, origin),
         Some(Commands::Daemon) => roost::daemon::run_daemon(),
-        Some(Commands::Setup { uninstall }) => {
+        Some(Commands::Setup {
+            uninstall,
+            sock,
+            origin,
+        }) => {
             if uninstall {
                 let path = roost::setup::uninstall_claude()?;
                 println!("Removed roost hooks from {}", path.display());
@@ -68,23 +108,83 @@ pub fn run() -> Result<()> {
                 }
                 Ok(())
             } else {
-                install_hooks()
+                install_hooks_with_opts(sock.as_deref(), origin.as_deref())
             }
         }
         Some(Commands::List) => roost::list::run_list(),
         Some(Commands::Update) => roost::update::run_update(),
+        Some(Commands::Add { target, origin }) => {
+            #[cfg(not(test))]
+            {
+                use roost::add::{AddOptions, StdSshRunner, run_add};
+                let registry_path = roost::remotes::remotes_path();
+                let daemon_sock = roost::sock::socket_path();
+                run_add(
+                    &StdSshRunner,
+                    AddOptions {
+                        target: &target,
+                        origin: origin.as_deref(),
+                        registry_path: &registry_path,
+                        daemon_sock: &daemon_sock,
+                    },
+                )
+            }
+            #[cfg(test)]
+            {
+                let _ = (target, origin);
+                Ok(())
+            }
+        }
+        Some(Commands::Remove { key, purge }) => {
+            #[cfg(not(test))]
+            {
+                use roost::add::StdSshRunner;
+                use roost::remove::{RemoveOptions, run_remove};
+                let registry_path = roost::remotes::remotes_path();
+                let daemon_sock = roost::sock::socket_path();
+                run_remove(
+                    &StdSshRunner,
+                    RemoveOptions {
+                        key: &key,
+                        registry_path: &registry_path,
+                        daemon_sock: &daemon_sock,
+                        purge,
+                    },
+                )
+            }
+            #[cfg(test)]
+            {
+                let _ = (key, purge);
+                Ok(())
+            }
+        }
+        Some(Commands::Remotes) => {
+            #[cfg(not(test))]
+            {
+                use roost::list_remotes::{ListRemotesOptions, run_list_remotes};
+                let registry_path = roost::remotes::remotes_path();
+                let daemon_sock = roost::sock::socket_path();
+                run_list_remotes(ListRemotesOptions {
+                    registry_path: &registry_path,
+                    daemon_sock: &daemon_sock,
+                })
+            }
+            #[cfg(test)]
+            Ok(())
+        }
     }
 }
 
 /// Install roost hooks into Claude Code (and Codex if present).
-fn install_hooks() -> Result<()> {
-    let path = roost::setup::install_claude()?;
+/// `sock` and `origin` are baked into the generated hook commands when given.
+fn install_hooks_with_opts(sock: Option<&str>, origin: Option<&str>) -> Result<()> {
+    let path = roost::setup::install_claude_with_opts(sock, origin)?;
     println!("Installed roost hooks in {}", path.display());
     println!("Restart Claude Code for hooks to take effect.");
 
     println!();
     println!("Note: Codex hooks use an experimental feature flag that may change.");
-    match roost::setup::install_codex() {
+    match roost::setup::install_codex_with_opts(sock, origin) {
         Ok(Some(dir)) => {
             println!("Installed Codex hooks in {}", dir.display());
             println!("Restart Codex for hooks to take effect.");
@@ -98,7 +198,7 @@ fn install_hooks() -> Result<()> {
     }
 
     println!();
-    match roost::setup::install_deepseek() {
+    match roost::setup::install_deepseek_with_opts(sock, origin) {
         Ok(Some(dir)) => {
             println!("Installed DeepSeek (CodeWhale) hooks in {}", dir.display());
             println!("Restart CodeWhale for hooks to take effect.");
@@ -112,7 +212,7 @@ fn install_hooks() -> Result<()> {
     }
 
     println!();
-    match roost::setup::install_cursor() {
+    match roost::setup::install_cursor_with_opts(sock, origin) {
         Ok(Some(path)) => {
             println!("Installed Cursor hooks in {}", path.display());
             println!("Cursor reloads hooks.json on save; restart Cursor if they don't load.");
@@ -129,6 +229,12 @@ fn install_hooks() -> Result<()> {
     maybe_hint_notify_send();
 
     Ok(())
+}
+
+/// Convenience: install without extra flags (local machine default behavior).
+#[allow(dead_code)]
+fn install_hooks() -> Result<()> {
+    install_hooks_with_opts(None, None)
 }
 
 /// On Linux, desktop notifications shell out to `notify-send` (from the

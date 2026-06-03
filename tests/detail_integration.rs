@@ -66,6 +66,7 @@ fn recv_line(stream: &mut UnixStream) -> String {
 fn make_event(kind: EventKind, session_id: &str) -> HookEvent {
     HookEvent {
         kind,
+        origin: None,
         family: AgentFamily::Claude,
         session_id: session_id.to_string(),
         cwd: "/home/user/payments-api".to_string(),

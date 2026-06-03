@@ -46,10 +46,12 @@ pub fn sound_for(state: AgentState) -> Option<&'static str> {
 ///
 /// `title` is always `"roost"`.
 ///
-/// `body` format:
+/// `body` format (local origin):
 /// - With `activity`: `"<family label> · <name> — <activity>"`
 /// - Without `activity` and state is `Done`: `"<family label> · <name> 完成"`
 /// - Without `activity` otherwise: `"<family label> · <name> 需要你"`
+///
+/// For non-local origin, the body is prefixed with `"<origin> · "`.
 ///
 /// **Precondition**: `state` should be one of `Question`, `Approval`, or
 /// `Done`. This is guaranteed by `trigger_for_transition`, which is the only
@@ -59,10 +61,11 @@ pub fn notification_text(
     name: &str,
     activity: Option<&str>,
     state: AgentState,
+    origin: &str,
 ) -> (String, String) {
     let title = "roost".to_string();
     let label = family.display_label();
-    let body = match activity {
+    let core = match activity {
         Some(act) => format!("{label} · {name} — {act}"),
         None => {
             if matches!(state, AgentState::Done) {
@@ -72,7 +75,19 @@ pub fn notification_text(
             }
         }
     };
+    let body = if origin == "local" {
+        core
+    } else {
+        format!("{origin} · {core}")
+    };
     (title, body)
+}
+
+/// Returns the `(title, body)` pair for a remote offline notification.
+///
+/// Used when a remote tunnel transitions to `Down` and the user has opted in.
+pub fn offline_text(origin: &str) -> (String, String) {
+    ("roost".to_string(), format!("{origin} 断开"))
 }
 
 /// Returns the path to a macOS system sound file.
@@ -158,12 +173,13 @@ pub fn fire(
     name: &str,
     activity: Option<&str>,
     state: AgentState,
+    origin: &str,
     banner: bool,
     sound: bool,
 ) {
     use std::process::{Command, Stdio};
 
-    let (title, body) = notification_text(family, name, activity, state);
+    let (title, body) = notification_text(family, name, activity, state, origin);
 
     if banner {
         let script = format!(
@@ -212,12 +228,13 @@ pub fn fire(
     name: &str,
     activity: Option<&str>,
     state: AgentState,
+    origin: &str,
     banner: bool,
     sound: bool,
 ) {
     use std::process::{Command, Stdio};
 
-    let (title, body) = notification_text(family, name, activity, state);
+    let (title, body) = notification_text(family, name, activity, state, origin);
 
     if banner {
         let mut cmd = Command::new("notify-send");
@@ -269,10 +286,98 @@ pub fn fire(
     _name: &str,
     _activity: Option<&str>,
     _state: AgentState,
+    _origin: &str,
     _banner: bool,
     _sound: bool,
 ) {
 }
+
+/// Fire a best-effort notification for a remote offline event (macOS).
+///
+/// Uses the "Bottle" sound (same as Approval) to draw attention.
+/// If `banner` is false and `sound` is false, this is a no-op.
+#[cfg(target_os = "macos")]
+pub fn fire_offline(origin: &str, banner: bool, sound: bool) {
+    use std::process::{Command, Stdio};
+
+    let (title, body) = offline_text(origin);
+
+    if banner {
+        let script = format!(
+            "display notification {} with title {}",
+            applescript_str(&body),
+            applescript_str(&title),
+        );
+        let _ = Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+
+    if sound {
+        // Use "Bottle" (same urgency level as Approval).
+        let path = sound_file("Bottle");
+        if path.exists() {
+            let _ = Command::new("afplay")
+                .arg(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        }
+    }
+}
+
+/// Fire a best-effort notification for a remote offline event (Linux).
+#[cfg(target_os = "linux")]
+pub fn fire_offline(origin: &str, banner: bool, sound: bool) {
+    use std::process::{Command, Stdio};
+
+    let (title, body) = offline_text(origin);
+
+    if banner {
+        let mut cmd = Command::new("notify-send");
+        cmd.arg("-a").arg("roost").arg("-u").arg("critical");
+        if sound {
+            cmd.arg("--hint")
+                .arg("string:sound-name:dialog-warning");
+        }
+        let _ = cmd
+            .arg(&title)
+            .arg(&body)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    } else if sound {
+        let played = Command::new("canberra-gtk-play")
+            .arg("-i")
+            .arg("dialog-warning")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok();
+        if !played {
+            let path = linux_sound_file("dialog-warning");
+            if path.exists() {
+                let _ = Command::new("paplay")
+                    .arg(&path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            }
+        }
+    }
+}
+
+/// No-op offline notifier on other platforms.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn fire_offline(_origin: &str, _banner: bool, _sound: bool) {}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -379,6 +484,7 @@ mod tests {
             "my-repo",
             None,
             AgentState::Done,
+            "local",
         );
         assert_eq!(title, "roost");
     }
@@ -390,6 +496,7 @@ mod tests {
             "my-repo",
             Some("editing src/main.rs"),
             AgentState::Question,
+            "local",
         );
         // Should contain family label, name, and activity separated by " — "
         assert!(
@@ -413,6 +520,7 @@ mod tests {
             "proj",
             None,
             AgentState::Done,
+            "local",
         );
         assert!(
             body.contains("完成"),
@@ -431,6 +539,7 @@ mod tests {
             "proj",
             None,
             AgentState::Question,
+            "local",
         );
         assert!(
             body.contains("需要你"),
@@ -445,6 +554,7 @@ mod tests {
             "proj",
             None,
             AgentState::Approval,
+            "local",
         );
         assert!(
             body.contains("需要你"),
@@ -460,11 +570,114 @@ mod tests {
             "my-proj",
             None,
             AgentState::Done,
+            "local",
         );
         assert!(
             body.starts_with("DeepSeek"),
             "body should start with family display label: {body:?}"
         );
+    }
+
+    // ── origin prefix tests ───────────────────────────────────────────────────
+
+    /// local origin → body identical to legacy format (no prefix)
+    #[test]
+    fn notification_text_local_origin_no_prefix() {
+        let (_, body) = notification_text(
+            &AgentFamily::Claude,
+            "payments-api",
+            None,
+            AgentState::Question,
+            "local",
+        );
+        // Must start with the family label, NOT a host prefix
+        assert!(
+            body.starts_with("Claude Code"),
+            "local origin must not add prefix: {body:?}"
+        );
+        assert!(
+            !body.contains(" · Claude Code"),
+            "local body must not have double-dot before family label: {body:?}"
+        );
+    }
+
+    /// non-local origin → body prefixed with "<origin> · "
+    #[test]
+    fn notification_text_remote_origin_prefixes_body() {
+        let (_, body) = notification_text(
+            &AgentFamily::Claude,
+            "payments-api",
+            None,
+            AgentState::Question,
+            "devbox1",
+        );
+        assert!(
+            body.starts_with("devbox1 · "),
+            "remote origin must prefix body with '<origin> · ': {body:?}"
+        );
+        assert!(
+            body.contains("payments-api"),
+            "name must still appear: {body:?}"
+        );
+        assert!(
+            body.contains("需要你"),
+            "trailing text must still appear: {body:?}"
+        );
+    }
+
+    /// remote origin + Done state → "<origin> · <label> · <name> 完成"
+    #[test]
+    fn notification_text_remote_origin_done() {
+        let (_, body) = notification_text(
+            &AgentFamily::Codex,
+            "my-proj",
+            None,
+            AgentState::Done,
+            "devbox2",
+        );
+        assert!(
+            body.starts_with("devbox2 · Codex"),
+            "remote+Done body must start with '<origin> · <label>': {body:?}"
+        );
+        assert!(body.contains("完成"), "must still say 完成: {body:?}");
+    }
+
+    /// remote origin + activity → prefix + activity
+    #[test]
+    fn notification_text_remote_origin_with_activity() {
+        let (_, body) = notification_text(
+            &AgentFamily::Claude,
+            "api",
+            Some("reading files"),
+            AgentState::Working,
+            "staging",
+        );
+        assert!(
+            body.starts_with("staging · "),
+            "remote origin must prefix: {body:?}"
+        );
+        assert!(body.contains("reading files"), "activity must appear: {body:?}");
+    }
+
+    // ── offline_text ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn offline_text_title_is_roost() {
+        let (title, _) = offline_text("devbox1");
+        assert_eq!(title, "roost");
+    }
+
+    #[test]
+    fn offline_text_body_contains_origin_and_disconnect() {
+        let (_, body) = offline_text("devbox1");
+        assert!(body.contains("devbox1"), "body must contain origin: {body:?}");
+        assert!(body.contains("断开"), "body must contain '断开': {body:?}");
+    }
+
+    #[test]
+    fn offline_text_exact_format() {
+        let (_, body) = offline_text("my-server");
+        assert_eq!(body, "my-server 断开");
     }
 
     // ── applescript_str ───────────────────────────────────────────────────────

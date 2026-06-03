@@ -65,6 +65,7 @@ fn recv_sessions(stream: &mut UnixStream) -> Vec<SessionView> {
 fn make_event(kind: EventKind, session_id: &str, pid: Option<u32>) -> HookEvent {
     HookEvent {
         kind,
+        origin: None,
         family: AgentFamily::Claude,
         session_id: session_id.to_string(),
         cwd: "/tmp/test-project".to_string(),

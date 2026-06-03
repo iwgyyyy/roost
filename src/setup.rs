@@ -6,6 +6,33 @@ use serde_json::Value;
 /// Marker prefix used to identify roost-managed hook entries.
 const ROOST_MARKER: &str = "roost hook ";
 
+// ---------------------------------------------------------------------------
+// Flag helpers
+// ---------------------------------------------------------------------------
+
+/// Build the optional flag fragment that is baked into hook commands.
+///
+/// The fragment is placed **after** `hook` in the generated command so that
+/// the `ROOST_MARKER` (`"roost hook "`) remains intact and idempotency checks
+/// continue to work. Returns a string like `" --sock /path --origin label"`
+/// (leading space included so it can be directly concatenated), or an empty
+/// string when both flags are absent.
+///
+/// Resulting command shape:
+///   `<roost_bin> hook [--sock <path>] [--origin <label>] <family> <event>`
+fn build_extra_flags(sock: Option<&str>, origin: Option<&str>) -> String {
+    let mut s = String::new();
+    if let Some(p) = sock {
+        s.push_str(" --sock ");
+        s.push_str(p);
+    }
+    if let Some(o) = origin {
+        s.push_str(" --origin ");
+        s.push_str(o);
+    }
+    s
+}
+
 /// The 7 Claude hook events roost registers.
 const CLAUDE_EVENTS: &[&str] = &[
     "SessionStart",
@@ -17,9 +44,18 @@ const CLAUDE_EVENTS: &[&str] = &[
     "SessionEnd",
 ];
 
-/// Merge roost hooks into existing Claude settings JSON.
-/// Returns the merged JSON value.
-pub fn merge_claude_hooks(existing: Option<Value>, roost_bin: &str) -> Value {
+/// Merge roost hooks into existing Claude settings JSON, with optional extra flags.
+///
+/// `sock` and `origin` are baked into every generated hook command; both are
+/// `None` for a local-machine install (zero diff vs. the original behaviour).
+pub fn merge_claude_hooks_with_flags(
+    existing: Option<Value>,
+    roost_bin: &str,
+    sock: Option<&str>,
+    origin: Option<&str>,
+) -> Value {
+    let extra = build_extra_flags(sock, origin);
+
     let mut root = match existing {
         Some(Value::Object(map)) => map,
         _ => serde_json::Map::new(),
@@ -43,7 +79,9 @@ pub fn merge_claude_hooks(existing: Option<Value>, roost_bin: &str) -> Value {
     };
 
     for event in CLAUDE_EVENTS {
-        let command = format!("{} hook claude {}", roost_bin, event);
+        // Flags go between `hook` and the family+event so the ROOST_MARKER
+        // ("roost hook ") prefix is preserved for idempotency detection.
+        let command = format!("{} hook{} claude {}", roost_bin, extra, event);
 
         // Get or create the array for this event
         let event_arr = hooks_map
@@ -75,6 +113,12 @@ pub fn merge_claude_hooks(existing: Option<Value>, roost_bin: &str) -> Value {
     }
 
     Value::Object(root)
+}
+
+/// Merge roost hooks into existing Claude settings JSON.
+/// Returns the merged JSON value.
+pub fn merge_claude_hooks(existing: Option<Value>, roost_bin: &str) -> Value {
+    merge_claude_hooks_with_flags(existing, roost_bin, None, None)
 }
 
 /// Create a roost hook entry object for a given command.
@@ -124,21 +168,37 @@ pub fn remove_claude_hooks(existing: Value) -> Value {
 }
 
 /// Install Claude Code hooks into ~/.claude/settings.json.
-pub fn install_claude() -> Result<PathBuf> {
+/// `sock` and `origin` are baked into commands when given.
+pub fn install_claude_with_opts(sock: Option<&str>, origin: Option<&str>) -> Result<PathBuf> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .context("HOME not set")?;
     let roost_bin = current_exe_path();
-    install_claude_into(std::path::Path::new(&home), &roost_bin)
+    install_claude_into_with_opts(std::path::Path::new(&home), &roost_bin, sock, origin)
+}
+
+/// Install Claude Code hooks into ~/.claude/settings.json.
+pub fn install_claude() -> Result<PathBuf> {
+    install_claude_with_opts(None, None)
 }
 
 /// Install Claude Code hooks using an explicit home directory and binary path.
 /// Useful for testing without mutating the real HOME or relying on the test binary name.
 pub fn install_claude_into(home_dir: &std::path::Path, roost_bin: &str) -> Result<PathBuf> {
+    install_claude_into_with_opts(home_dir, roost_bin, None, None)
+}
+
+/// Install Claude Code hooks using an explicit home directory, binary path, and optional flags.
+pub fn install_claude_into_with_opts(
+    home_dir: &std::path::Path,
+    roost_bin: &str,
+    sock: Option<&str>,
+    origin: Option<&str>,
+) -> Result<PathBuf> {
     let path = home_dir.join(".claude").join("settings.json");
 
     let existing = read_settings(&path)?;
-    let merged = merge_claude_hooks(existing, roost_bin);
+    let merged = merge_claude_hooks_with_flags(existing, roost_bin, sock, origin);
 
     write_settings_atomic(&path, &merged)?;
     Ok(path)
@@ -349,7 +409,7 @@ fn is_codex_roost_group_for(group: &Value, command: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Merge roost hooks into existing Codex hooks.json.
+/// Merge roost hooks into existing Codex hooks.json, with optional extra flags.
 ///
 /// Uses the correct Codex schema:
 /// ```json
@@ -364,7 +424,15 @@ fn is_codex_roost_group_for(group: &Value, command: &str) -> bool {
 /// - Preserves existing non-roost groups in each event array (e.g. third-party hooks).
 /// - Idempotent: running install twice does not produce duplicate roost groups.
 /// - Cleans up stale flat root-level keys written by the old buggy schema.
-pub fn merge_codex_hooks_json(existing: Option<Value>, roost_bin: &str) -> Value {
+/// - `sock` and `origin` are baked into every generated command when given.
+pub fn merge_codex_hooks_json_with_flags(
+    existing: Option<Value>,
+    roost_bin: &str,
+    sock: Option<&str>,
+    origin: Option<&str>,
+) -> Value {
+    let extra = build_extra_flags(sock, origin);
+
     let mut root = match existing {
         Some(Value::Object(map)) => map,
         _ => serde_json::Map::new(),
@@ -372,7 +440,6 @@ pub fn merge_codex_hooks_json(existing: Option<Value>, roost_bin: &str) -> Value
 
     // ── 1. Remove stale root-level keys from old buggy schema ────────────────
     for key in CODEX_STALE_ROOT_KEYS {
-        // Only remove if it is NOT inside the "hooks" object (i.e. it's at root level).
         root.remove(*key);
     }
 
@@ -394,7 +461,7 @@ pub fn merge_codex_hooks_json(existing: Option<Value>, roost_bin: &str) -> Value
 
     // ── 3. For each event, append roost group if not already present ──────────
     for event in CODEX_EVENTS {
-        let command = format!("{} hook codex {}", roost_bin, event);
+        let command = format!("{} hook{} codex {}", roost_bin, extra, event);
 
         let event_arr = hooks_map
             .entry(*event)
@@ -412,6 +479,11 @@ pub fn merge_codex_hooks_json(existing: Option<Value>, roost_bin: &str) -> Value
     }
 
     Value::Object(root)
+}
+
+/// Merge roost hooks into existing Codex hooks.json.
+pub fn merge_codex_hooks_json(existing: Option<Value>, roost_bin: &str) -> Value {
+    merge_codex_hooks_json_with_flags(existing, roost_bin, None, None)
 }
 
 /// Remove roost-managed groups from Codex hooks.json.
@@ -490,22 +562,26 @@ fn resolve_codex_dir() -> Result<Option<PathBuf>> {
 }
 
 /// Install Codex hooks using the real HOME / CODEX_HOME.
-/// Resolves the Codex directory (respecting CODEX_HOME), then delegates to
-/// `install_codex_into`.
-/// Returns Ok(None) if the Codex directory is not found (not installed).
-pub fn install_codex() -> Result<Option<PathBuf>> {
+/// `sock` and `origin` are baked into commands when given.
+pub fn install_codex_with_opts(sock: Option<&str>, origin: Option<&str>) -> Result<Option<PathBuf>> {
     let roost_bin = current_exe_path();
     let codex_dir = resolve_codex_dir()?;
     let base_dir = match codex_dir {
-        // resolve_codex_dir already resolved the full .codex path; derive the
-        // "home" by taking its parent so install_codex_into can join(".codex").
         Some(d) => d
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| d.clone()),
         None => return Ok(None),
     };
-    install_codex_into(&base_dir, &roost_bin)
+    install_codex_into_with_opts(&base_dir, &roost_bin, sock, origin)
+}
+
+/// Install Codex hooks using the real HOME / CODEX_HOME.
+/// Resolves the Codex directory (respecting CODEX_HOME), then delegates to
+/// `install_codex_into`.
+/// Returns Ok(None) if the Codex directory is not found (not installed).
+pub fn install_codex() -> Result<Option<PathBuf>> {
+    install_codex_with_opts(None, None)
 }
 
 /// Install Codex hooks into an explicit base (home) directory.
@@ -513,6 +589,16 @@ pub fn install_codex() -> Result<Option<PathBuf>> {
 /// `.codex` internally; never reads `CODEX_HOME`.
 /// Returns Ok(None) if `base_dir/.codex` does not exist (Codex not installed).
 pub fn install_codex_into(base_dir: &Path, roost_bin: &str) -> Result<Option<PathBuf>> {
+    install_codex_into_with_opts(base_dir, roost_bin, None, None)
+}
+
+/// Install Codex hooks into an explicit base directory with optional extra flags.
+pub fn install_codex_into_with_opts(
+    base_dir: &Path,
+    roost_bin: &str,
+    sock: Option<&str>,
+    origin: Option<&str>,
+) -> Result<Option<PathBuf>> {
     let codex_dir = base_dir.join(".codex");
     if !codex_dir.exists() {
         return Ok(None);
@@ -530,7 +616,7 @@ pub fn install_codex_into(base_dir: &Path, roost_bin: &str) -> Result<Option<Pat
     } else {
         None
     };
-    let merged = merge_codex_hooks_json(existing_hooks, roost_bin);
+    let merged = merge_codex_hooks_json_with_flags(existing_hooks, roost_bin, sock, origin);
     write_json_atomic(&hooks_path, &merged)?;
 
     // 2. Update config.toml
@@ -630,13 +716,21 @@ const DEEPSEEK_EVENTS: &[(&str, &str)] = &[
     ("session_end", "SessionEnd"),
 ];
 
-/// Merge roost hooks into a CodeWhale `config.toml` string.
+/// Merge roost hooks into a CodeWhale `config.toml` string, with optional extra flags.
 ///
 /// Sets `[hooks] enabled = true` and appends one `[[hooks.hooks]]` table per
 /// event. Idempotent (no duplicate roost entries on re-run); preserves the
 /// user's own hooks, formatting, and comments via `toml_edit`.
-pub fn merge_deepseek_hooks_toml(config_toml: &str, roost_bin: &str) -> Result<String> {
+/// `sock` and `origin` are baked into every generated command when given.
+pub fn merge_deepseek_hooks_toml_with_flags(
+    config_toml: &str,
+    roost_bin: &str,
+    sock: Option<&str>,
+    origin: Option<&str>,
+) -> Result<String> {
     use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
+
+    let extra = build_extra_flags(sock, origin);
 
     let mut doc: DocumentMut = config_toml
         .parse()
@@ -665,7 +759,7 @@ pub fn merge_deepseek_hooks_toml(config_toml: &str, roost_bin: &str) -> Result<S
         .expect("hooks.hooks is an array-of-tables");
 
     for (cw_event, roost_event) in DEEPSEEK_EVENTS {
-        let command = format!("{roost_bin} hook deepseek {roost_event}");
+        let command = format!("{roost_bin} hook{extra} deepseek {roost_event}");
         let exists = aot
             .iter()
             .any(|t| t.get("command").and_then(|c| c.as_str()) == Some(command.as_str()));
@@ -678,6 +772,11 @@ pub fn merge_deepseek_hooks_toml(config_toml: &str, roost_bin: &str) -> Result<S
     }
 
     Ok(doc.to_string())
+}
+
+/// Merge roost hooks into a CodeWhale `config.toml` string.
+pub fn merge_deepseek_hooks_toml(config_toml: &str, roost_bin: &str) -> Result<String> {
+    merge_deepseek_hooks_toml_with_flags(config_toml, roost_bin, None, None)
 }
 
 /// Remove roost-managed `[[hooks.hooks]]` entries from a CodeWhale config.toml.
@@ -756,24 +855,40 @@ fn resolve_deepseek_dir() -> Result<Option<PathBuf>> {
 }
 
 /// Install CodeWhale hooks using the real HOME.
-/// Returns Ok(None) if no CodeWhale config dir exists (not installed).
-pub fn install_deepseek() -> Result<Option<PathBuf>> {
+/// `sock` and `origin` are baked into commands when given.
+pub fn install_deepseek_with_opts(sock: Option<&str>, origin: Option<&str>) -> Result<Option<PathBuf>> {
     let roost_bin = current_exe_path();
     match resolve_deepseek_dir()? {
-        Some(dir) => install_deepseek_into(&dir, &roost_bin),
+        Some(dir) => install_deepseek_into_with_opts(&dir, &roost_bin, sock, origin),
         None => Ok(None),
     }
 }
 
+/// Install CodeWhale hooks using the real HOME.
+/// Returns Ok(None) if no CodeWhale config dir exists (not installed).
+pub fn install_deepseek() -> Result<Option<PathBuf>> {
+    install_deepseek_with_opts(None, None)
+}
+
 /// Install CodeWhale hooks into an explicit config dir (e.g. `~/.codewhale`).
 pub fn install_deepseek_into(config_dir: &Path, roost_bin: &str) -> Result<Option<PathBuf>> {
+    install_deepseek_into_with_opts(config_dir, roost_bin, None, None)
+}
+
+/// Install CodeWhale hooks into an explicit config dir with optional extra flags.
+pub fn install_deepseek_into_with_opts(
+    config_dir: &Path,
+    roost_bin: &str,
+    sock: Option<&str>,
+    origin: Option<&str>,
+) -> Result<Option<PathBuf>> {
     let config_path = config_dir.join("config.toml");
     let existing = if config_path.exists() {
         std::fs::read_to_string(&config_path)?
     } else {
         String::new()
     };
-    let updated = merge_deepseek_hooks_toml(&existing, roost_bin)?;
+    let updated = merge_deepseek_hooks_toml_with_flags(&existing, roost_bin, sock, origin)?;
     write_file_atomic(&config_path, &updated)?;
     Ok(Some(config_dir.to_path_buf()))
 }
@@ -831,9 +946,17 @@ fn is_cursor_roost_entry(entry: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Merge roost hooks into a Cursor `hooks.json` value (schema version 1).
+/// Merge roost hooks into a Cursor `hooks.json` value (schema version 1), with optional flags.
 /// Idempotent; preserves the user's own hooks in each event array.
-pub fn merge_cursor_hooks_json(existing: Option<Value>, roost_bin: &str) -> Value {
+/// `sock` and `origin` are baked into every generated command when given.
+pub fn merge_cursor_hooks_json_with_flags(
+    existing: Option<Value>,
+    roost_bin: &str,
+    sock: Option<&str>,
+    origin: Option<&str>,
+) -> Value {
+    let extra = build_extra_flags(sock, origin);
+
     let mut root = match existing {
         Some(Value::Object(map)) => map,
         _ => serde_json::Map::new(),
@@ -855,7 +978,7 @@ pub fn merge_cursor_hooks_json(existing: Option<Value>, roost_bin: &str) -> Valu
     };
 
     for (cursor_event, roost_event) in CURSOR_EVENTS {
-        let command = format!("{roost_bin} hook cursor {roost_event}");
+        let command = format!("{roost_bin} hook{extra} cursor {roost_event}");
         let arr = hooks_map
             .entry(*cursor_event)
             .or_insert_with(|| Value::Array(vec![]));
@@ -870,6 +993,12 @@ pub fn merge_cursor_hooks_json(existing: Option<Value>, roost_bin: &str) -> Valu
     }
 
     Value::Object(root)
+}
+
+/// Merge roost hooks into a Cursor `hooks.json` value (schema version 1).
+/// Idempotent; preserves the user's own hooks in each event array.
+pub fn merge_cursor_hooks_json(existing: Option<Value>, roost_bin: &str) -> Value {
+    merge_cursor_hooks_json_with_flags(existing, roost_bin, None, None)
 }
 
 /// Remove roost-managed entries from a Cursor hooks.json. Preserves user hooks.
@@ -888,23 +1017,38 @@ pub fn remove_cursor_hooks_json(existing: Value) -> Value {
     Value::Object(root)
 }
 
-/// Install Cursor hooks using the real HOME. Ok(None) if `~/.cursor` is absent.
-pub fn install_cursor() -> Result<Option<PathBuf>> {
+/// Install Cursor hooks using the real HOME. `sock`/`origin` are baked into commands.
+pub fn install_cursor_with_opts(sock: Option<&str>, origin: Option<&str>) -> Result<Option<PathBuf>> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .context("HOME not set")?;
-    install_cursor_into(Path::new(&home), &current_exe_path())
+    install_cursor_into_with_opts(Path::new(&home), &current_exe_path(), sock, origin)
+}
+
+/// Install Cursor hooks using the real HOME. Ok(None) if `~/.cursor` is absent.
+pub fn install_cursor() -> Result<Option<PathBuf>> {
+    install_cursor_with_opts(None, None)
 }
 
 /// Install Cursor hooks into `<home>/.cursor/hooks.json`. Ok(None) if absent.
 pub fn install_cursor_into(home_dir: &Path, roost_bin: &str) -> Result<Option<PathBuf>> {
+    install_cursor_into_with_opts(home_dir, roost_bin, None, None)
+}
+
+/// Install Cursor hooks into `<home>/.cursor/hooks.json` with optional extra flags.
+pub fn install_cursor_into_with_opts(
+    home_dir: &Path,
+    roost_bin: &str,
+    sock: Option<&str>,
+    origin: Option<&str>,
+) -> Result<Option<PathBuf>> {
     let cursor_dir = home_dir.join(".cursor");
     if !cursor_dir.exists() {
         return Ok(None);
     }
     let path = cursor_dir.join("hooks.json");
     let existing = read_settings(&path)?;
-    let merged = merge_cursor_hooks_json(existing, roost_bin);
+    let merged = merge_cursor_hooks_json_with_flags(existing, roost_bin, sock, origin);
     write_json_atomic(&path, &merged)?;
     Ok(Some(path))
 }
@@ -1606,5 +1750,193 @@ command = \"echo my-own-hook\"
             .and_then(|c| c.as_str())
             .unwrap();
         assert_eq!(cmd, "my-custom-hook");
+    }
+
+    // ── Task A1: --sock / --origin烤入 setup 生成的命令行 ─────────────────────
+
+    /// Helper: 从 Claude hooks result 中提取第一条命令字符串.
+    fn claude_cmd(result: &Value, event: &str) -> String {
+        result
+            .get("hooks")
+            .and_then(|h| h.get(event))
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.last()) // roost entry is appended last
+            .and_then(|e| e.get("hooks"))
+            .and_then(|h| h.as_array())
+            .and_then(|h| h.first())
+            .and_then(|h| h.get("command"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// Helper: 从 Codex hooks result 提取第一条命令字符串.
+    fn codex_cmd(result: &Value, event: &str) -> String {
+        result
+            .get("hooks")
+            .and_then(|h| h.get(event))
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|g| g.get("hooks"))
+            .and_then(|h| h.as_array())
+            .and_then(|h| h.first())
+            .and_then(|h| h.get("command"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// Helper: 从 Cursor hooks result 提取第一条命令字符串.
+    fn cursor_cmd(result: &Value, cursor_event: &str) -> String {
+        result
+            .get("hooks")
+            .and_then(|h| h.get(cursor_event))
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|e| e.get("command"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    // No flags → commands identical to legacy format (zero regression).
+    #[test]
+    fn setup_no_flags_claude_command_unchanged() {
+        let result = merge_claude_hooks_with_flags(None, "/usr/bin/roost", None, None);
+        let cmd = claude_cmd(&result, "SessionStart");
+        assert_eq!(cmd, "/usr/bin/roost hook claude SessionStart");
+    }
+
+    #[test]
+    fn setup_no_flags_codex_command_unchanged() {
+        let result = merge_codex_hooks_json_with_flags(None, "/usr/bin/roost", None, None);
+        let cmd = codex_cmd(&result, "SessionStart");
+        assert_eq!(cmd, "/usr/bin/roost hook codex SessionStart");
+    }
+
+    #[test]
+    fn setup_no_flags_cursor_command_unchanged() {
+        let result = merge_cursor_hooks_json_with_flags(None, "/usr/bin/roost", None, None);
+        let cmd = cursor_cmd(&result, "sessionStart");
+        assert_eq!(cmd, "/usr/bin/roost hook cursor SessionStart");
+    }
+
+    // Both --sock and --origin are baked into generated commands.
+    #[test]
+    fn setup_with_sock_and_origin_claude() {
+        let result = merge_claude_hooks_with_flags(
+            None,
+            "/usr/bin/roost",
+            Some("~/.roost/hub.sock"),
+            Some("devbox1"),
+        );
+        let cmd = claude_cmd(&result, "SessionStart");
+        assert!(
+            cmd.contains("--sock ~/.roost/hub.sock"),
+            "sock flag missing: {cmd}"
+        );
+        assert!(
+            cmd.contains("--origin devbox1"),
+            "origin flag missing: {cmd}"
+        );
+        assert!(
+            cmd.ends_with("claude SessionStart"),
+            "family/event suffix missing: {cmd}"
+        );
+    }
+
+    #[test]
+    fn setup_with_sock_and_origin_codex() {
+        let result = merge_codex_hooks_json_with_flags(
+            None,
+            "/usr/bin/roost",
+            Some("/tmp/hub.sock"),
+            Some("remote1"),
+        );
+        let cmd = codex_cmd(&result, "SessionStart");
+        assert!(cmd.contains("--sock /tmp/hub.sock"), "sock flag missing: {cmd}");
+        assert!(cmd.contains("--origin remote1"), "origin flag missing: {cmd}");
+        assert!(cmd.ends_with("codex SessionStart"), "family/event suffix: {cmd}");
+    }
+
+    #[test]
+    fn setup_with_sock_and_origin_cursor() {
+        let result = merge_cursor_hooks_json_with_flags(
+            None,
+            "/usr/bin/roost",
+            Some("/tmp/hub.sock"),
+            Some("remote1"),
+        );
+        let cmd = cursor_cmd(&result, "sessionStart");
+        assert!(cmd.contains("--sock /tmp/hub.sock"), "sock flag missing: {cmd}");
+        assert!(cmd.contains("--origin remote1"), "origin flag missing: {cmd}");
+        assert!(cmd.ends_with("cursor SessionStart"), "family/event suffix: {cmd}");
+    }
+
+    // Only --sock (no --origin).
+    #[test]
+    fn setup_with_sock_only_claude() {
+        let result = merge_claude_hooks_with_flags(
+            None,
+            "/usr/bin/roost",
+            Some("/tmp/hub.sock"),
+            None,
+        );
+        let cmd = claude_cmd(&result, "SessionStart");
+        assert!(cmd.contains("--sock /tmp/hub.sock"), "sock flag missing: {cmd}");
+        assert!(!cmd.contains("--origin"), "origin should not appear: {cmd}");
+    }
+
+    // Only --origin (no --sock).
+    #[test]
+    fn setup_with_origin_only_codex() {
+        let result =
+            merge_codex_hooks_json_with_flags(None, "/usr/bin/roost", None, Some("remote1"));
+        let cmd = codex_cmd(&result, "SessionStart");
+        assert!(!cmd.contains("--sock"), "sock should not appear: {cmd}");
+        assert!(cmd.contains("--origin remote1"), "origin flag missing: {cmd}");
+    }
+
+    // DeepSeek TOML: --sock / --origin烤进命令.
+    #[test]
+    fn setup_no_flags_deepseek_command_unchanged() {
+        let result = merge_deepseek_hooks_toml_with_flags("", "/usr/bin/roost", None, None).unwrap();
+        assert!(
+            result.contains("/usr/bin/roost hook deepseek SessionStart"),
+            "baseline deepseek cmd missing"
+        );
+        assert!(!result.contains("--sock"), "unexpected --sock in baseline");
+        assert!(!result.contains("--origin"), "unexpected --origin in baseline");
+    }
+
+    #[test]
+    fn setup_with_flags_deepseek() {
+        let result = merge_deepseek_hooks_toml_with_flags(
+            "",
+            "/usr/bin/roost",
+            Some("/tmp/hub.sock"),
+            Some("remote1"),
+        )
+        .unwrap();
+        assert!(
+            result.contains("--sock /tmp/hub.sock"),
+            "sock flag missing in deepseek toml: {result}"
+        );
+        assert!(
+            result.contains("--origin remote1"),
+            "origin flag missing in deepseek toml: {result}"
+        );
+    }
+
+    // Idempotent with flags: second merge doesn't duplicate entries.
+    #[test]
+    fn setup_with_flags_claude_idempotent() {
+        let r1 = merge_claude_hooks_with_flags(None, "/usr/bin/roost", Some("/tmp/h.sock"), Some("box1"));
+        let r2 = merge_claude_hooks_with_flags(Some(r1.clone()), "/usr/bin/roost", Some("/tmp/h.sock"), Some("box1"));
+        for event in CLAUDE_EVENTS {
+            let len1 = r1.get("hooks").and_then(|h| h.get(*event)).and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let len2 = r2.get("hooks").and_then(|h| h.get(*event)).and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            assert_eq!(len1, len2, "claude event {event} duplicated after second merge with flags");
+        }
     }
 }

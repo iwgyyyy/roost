@@ -48,6 +48,7 @@ fn wait_for_socket(path: &PathBuf, timeout: Duration) {
 fn make_event(kind: EventKind, session_id: &str, cwd: &str) -> HookEvent {
     HookEvent {
         kind,
+        origin: None,
         family: AgentFamily::Claude,
         session_id: session_id.to_string(),
         cwd: cwd.to_string(),
