@@ -222,10 +222,18 @@ Remote sessions show their origin host in the panel. If a tunnel drops, those
 sessions **freeze** (greyed, dashed border) instead of vanishing, and the daemon
 reconnects automatically; they refresh on the agent's next event.
 
-**Preconditions.** Key-based, non-interactive `ssh <host>` must work (roost adds no
-auth of its own), and the remote needs network access for the one-time binary
-install. A **remote-offline** notification is available but **off by default** —
-toggle it on the settings page (`c`) or in `~/.roost/settings.json`.
+**Preconditions.** Before `roost add`, make sure:
+
+- **Passwordless SSH** — `ssh <host>` connects non-interactively with a key. roost adds no auth of its own and runs every command in `BatchMode`, so a password prompt makes it fail. Run `ssh-copy-id <host>` first if needed.
+- **Standard port (22)** — `roost add user@host` takes no `-p`. For a non-standard port, add a `~/.ssh/config` alias (with `Port`, `User`, `IdentityFile`) and run `roost add <alias>`.
+- **Network + `curl`** on the remote, for the one-time binary install.
+- **Supported OS** — the remote must be Linux (x86_64 / arm64) or macOS.
+
+Only **newly started** agent sessions report after `roost add` — already-running
+agents load their hooks at launch, so they won't show up until their next session.
+
+A **remote-offline** notification is available but **off by default** — toggle it on
+the settings page (`c`) or in `~/.roost/settings.json`.
 
 **Jump.** `o` can't focus a remote terminal from here; for a remote session it tells
 you which host to SSH into. **Security.** Anyone who can write the forwarded socket

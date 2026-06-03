@@ -212,7 +212,16 @@ agent 跑在远程 dev box 上?`roost add user@devbox1` 把那台机器的 agent
 
 远程会话在面板里标出来源主机。隧道掉线时,这些会话会**冻结**(置灰、虚线边框)而不是消失,daemon 自动重连;它们在该 agent 的下一个事件时刷新。
 
-**前提。** 免密、非交互的 `ssh <host>` 必须可用(roost 不引入任何自有认证);远程需要联网做一次性二进制安装。**远端掉线通知**可用但**默认关闭**——在设置页(`c`)或 `~/.roost/settings.json` 里开。
+**前提。** 跑 `roost add` 之前,确保:
+
+- **免密 SSH** —— `ssh <host>` 能用密钥非交互连上。roost 不引入任何自有认证,且所有命令走 `BatchMode`,弹密码就会失败。没配好先 `ssh-copy-id <host>`。
+- **标准端口(22)** —— `roost add user@host` 不接受 `-p`。非标准端口请在 `~/.ssh/config` 配别名(写上 `Port`、`User`、`IdentityFile`),再 `roost add <别名>`。
+- **联网 + `curl`** —— 远程需要联网做一次性二进制安装。
+- **支持的系统** —— 远程必须是 Linux(x86_64 / arm64)或 macOS。
+
+`roost add` 之后只有**新启动**的 agent 会话才会上报——已经在跑的 agent 是启动时加载 hook 的,要等它下一个会话才出现。
+
+**远端掉线通知**可用但**默认关闭**——在设置页(`c`)或 `~/.roost/settings.json` 里开。
 
 **跳转。** `o` 无法从本机聚焦远程终端;对远程会话它只会告诉你该 SSH 进哪台机器。**安全。** 能在远程写那个转发 socket 的人就能往你本机 daemon 注入事件——个人 dev box 没问题,共享机器需留意。
 
