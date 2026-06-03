@@ -4,22 +4,35 @@
 
 在一个终端面板里盯住你所有的 AI 编码 agent。
 
-`roost` 是一个被动、只读的观察器：在任意终端里运行它，就能实时看到机器上所有正在运行的 AI 编码 agent 会话——**Claude Code**、**Codex**、**DeepSeek（CodeWhale）**、**Cursor**——并按「是否需要你介入」分组排列。
+`roost` 是一个被动、只读的观察器：在任意终端里运行它，就能实时看到机器上所有正在运行的 AI 编码 agent 会话——**Claude Code**、**Codex**、**DeepSeek（CodeWhale）**、**Cursor**——并按「是否需要你介入」分组排列。用 `roost add user@host` 加一台远程 dev box,它的 agent 也会经 SSH 出现在同一块面板里。
 
 ```
-┌─ roost ──────────────────────────────────────────────────── 4 agents · live ● ─┐
+  roost                                            4 agents · live ●
 
   NEEDS INPUT  1
- ▌⬡ Codex     payments-api   ? 用哪种迁移策略？ (1/2)            Codex     8s
+  ┌ ✻ Claude ───────────────────────── ? Question ·  8s ┐
+  ┊ ▸ choose: Postgres or SQLite?                       ┊
+  ┊ ~/work/payments-api              @local · via Cursor ┊
+  └─────────────────────────────────────────────────────┘
 
   WORKING  2
-  ✻ Claude    roost          ⠸ working   Editing src/session.rs   Zed       1m
-  ❯ Cursor    web-frontend   ⠸ working   Editing app/page.tsx     Cursor    12s
+  ┏ ✻ Claude ──────────────────────── ⠹ Working ·  3s ━┓  ← 选中:heavy 主题色边框
+  ┃ ▸ Editing src/components/Editor.tsx                 ┃
+  ┃ ~/dev/myapp                    @local · via Ghostty  ┃
+  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ┌ ⬡ Codex ───────────────────────── ⠹ Working · 12s ┐
+  ┊ ▸ Editing app/page.tsx                             ┊
+  ┊ ~/work/api               @desk-mini · via VS Code  ┊  ← 远程:设备名染冷蓝
+  └────────────────────────────────────────────────────┘
 
-  IDLE  1
-  ≈ DeepSeek  api-server     ✓ done                               Warp      3m
+  OFFLINE  1
+  ┌┄ ≈ CodeWhale ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ⊘ offline ·  2m ┄┐  ← 掉线:虚线 + 置灰
+  ┊ ⊘ Training run · epoch 4/10                         ┊
+  ┊ ~/ml/pipeline                 @gpu-rig · via Cursor  ┊
+  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘
 
-  ↑/↓ j/k select · enter peek · o jump · s stats · c settings · q quit
+  ~/dev/myapp
+  ↑/↓ select   enter peek   o jump   s stats   c settings   q quit
 ```
 
 roost **不会**启动、代理或控制任何 agent。它完全依靠各 agent 自己触发的 hook 回调工作——只需一次 `roost setup` 安装这些 hook。
@@ -29,7 +42,7 @@ roost **不会**启动、代理或控制任何 agent。它完全依靠各 agent 
 ## 功能
 
 - **一个面板看全部 agent**——机器上所有运行中的 Claude Code、Codex、DeepSeek（CodeWhale）、Cursor 会话，实时更新。
-- **以「需要关注」优先分组**——会话按 `NEEDS INPUT` → `WORKING` → `IDLE` 排序，等你处理的浮在最上面。
+- **以「需要关注」优先分组**——会话按 `NEEDS INPUT` → `WORKING` → `IDLE` → `OFFLINE` 排序，等你处理的浮在最上面；掉线的远端会话沉到底部。
 - **细粒度会话状态**——Approval（待授权）、Question（待回答）、Working（工作中）、Done（已完成）、Idle（空闲），各有独立字形与颜色。
 - **clarify 询问卡片**——当 agent 弹出交互式问题（Claude 的 `AskUserQuestion`、Codex 的 `request_user_input`）时，roost 直接显示**实际的问题文本**，多问题卡片还带 `(1/N)` 计数，而不是笼统的「needs permission」。
 - **实时活动文本**——每个 agent 当前在干什么（`Editing src/foo.rs`、`Running tests`、`thinking…`）。
@@ -89,6 +102,9 @@ roost
 | `roost update` | 就地更新到最新版本（仅适用于脚本安装）。 |
 | `roost daemon` | 在前台运行后台 daemon。通常由 `roost` 自动启动。 |
 | `roost hook <family> <event>` | 由 agent 的 hook 调用——向 daemon 发送一个事件后立即退出。 |
+| `roost add <user@host>` | 接入一台远程 dev box:经 SSH 装好 roost + hook,并把它的事件转发回本机。见[远程 fleet](#远程-fleetssh)。 |
+| `roost remove <user@host>` | 移除一台远程:停隧道、注销、卸载其 hook。`--purge` 连远端二进制一起删。 |
+| `roost remotes` | 列出已接入的远程及其隧道状态。 |
 
 ### 按键
 
@@ -132,7 +148,7 @@ agent 触发 hook
 
 ## 会话状态
 
-按优先级分组：**NEEDS INPUT**（先 Approval 后 Question）→ **WORKING** → **IDLE**。
+按优先级分组：**NEEDS INPUT**（先 Approval 后 Question）→ **WORKING** → **IDLE** → **OFFLINE**（垫底）。
 
 | 状态 | 字形 | 颜色 | 触发 |
 |---|---|---|---|
@@ -141,8 +157,9 @@ agent 触发 hook
 | Working | 盲文 spinner | 绿色 | `UserPromptSubmit`、`PreToolUse`、`PostToolUse` |
 | Done | `✓` | 暗绿色 | `Stop` |
 | Idle | `○` | 石板灰 | 首条 prompt 之前的 `SessionStart`，或收到空闲通知后 |
+| Offline | `⊘` | 置灰 | 远端 SSH 隧道掉线；卡片以虚线边框 + 整体置灰显示 |
 
-当 `SessionEnd` 触发、或 agent 进程退出被存活探测发现时，会话会被**移除**（而不是显示成「已断开」）。
+本地会话在 `SessionEnd` 触发、或 agent 进程退出被存活探测发现时，会被**移除**（而不是显示成「已断开」）。远端会话隧道掉线时进入 OFFLINE 组冻结显示，重连后自动刷新。
 
 ---
 
@@ -162,17 +179,42 @@ agent 触发 hook
 
 ```json
 {
+  "accent": "#d97757",
   "notify": {
-    "clarify": { "banner": true, "sound": true },
-    "approve": { "banner": true, "sound": true },
-    "done":    { "banner": true, "sound": true }
+    "clarify":        { "banner": true,  "sound": true  },
+    "approve":        { "banner": true,  "sound": true  },
+    "done":           { "banner": true,  "sound": true  },
+    "remote_offline": false
   }
 }
 ```
 
-可以直接编辑该文件，或在面板里按 **`c`** 打开可滚动的设置页逐个开关——切换即保存，下次通知生效。文件或字段缺失时回退为全部开启（fail-open）。
+- **`accent`** — 主题色（hex），用于选中卡片边框和 header 中 `roost` 品牌文字的颜色。默认 `"#d97757"`。
+- **`notify.remote_offline`** — 远端 SSH 隧道掉线时是否弹通知（会话进入 OFFLINE 组）。默认关闭，在此处或设置页（`c`）开启。
+
+可以直接编辑该文件，或在面板里按 **`c`** 打开可滚动的设置页逐个开关——切换即保存，下次通知生效。文件或字段缺失时回退为全部开启（fail-open）；`remote_offline` 例外，缺省为 `false`。
 
 **平台支持。** macOS：弹窗用 `osascript`，声音用 `afplay`，都是系统自带、无需安装。Linux：用 `notify-send`（来自 `libnotify-bin` / `libnotify`），各阶段的声音通过 freedesktop 的 `sound-name` hint 随通知一起播放（`message-new-instant` / `dialog-warning` / `complete`）；当只开声音不开弹窗时，回退到 `canberra-gtk-play` / `paplay`。工具缺失、或没有桌面会话（headless / SSH）时，通知静默降级为 no-op，**绝不报错**；`notify-send` 不存在时 `roost setup` 会提示你装哪个包。其它平台一律 no-op。
+
+---
+
+## 远程 fleet（SSH）
+
+agent 跑在远程 dev box 上?`roost add user@devbox1` 把那台机器的 agent 接进你本机面板——而且它们的通知弹在 **你** 这台机器上。
+
+本机是 **hub**:唯一的 daemon、TUI、通知都在这。每台远程是被动转发端,**不跑 daemon**。`roost add` 经 SSH 在远程装好 roost 及其 hook(二进制缺失则自动安装),随后本机 daemon 看守一条常驻的 SSH 反向转发隧道(`ssh -N -R`),把远程的 hook 事件透传回 hub。已接入的远程记录在 hub 的 `~/.roost/remotes.json`,daemon 启动时自动重新拉起。
+
+| 命令 | 作用 |
+|---|---|
+| `roost add user@host [--origin name]` | 安装 + 注册一台远程,拉起隧道 |
+| `roost remove user@host [--purge]` | 停隧道、注销、卸载远端 hook |
+| `roost remotes` | 列出远程及隧道状态(up / reconnecting / down) |
+
+远程会话在面板里标出来源主机。隧道掉线时,这些会话会**冻结**(置灰、虚线边框)而不是消失,daemon 自动重连;它们在该 agent 的下一个事件时刷新。
+
+**前提。** 免密、非交互的 `ssh <host>` 必须可用(roost 不引入任何自有认证);远程需要联网做一次性二进制安装。**远端掉线通知**可用但**默认关闭**——在设置页(`c`)或 `~/.roost/settings.json` 里开。
+
+**跳转。** `o` 无法从本机聚焦远程终端;对远程会话它只会告诉你该 SSH 进哪台机器。**安全。** 能在远程写那个转发 socket 的人就能往你本机 daemon 注入事件——个人 dev box 没问题,共享机器需留意。
 
 ---
 

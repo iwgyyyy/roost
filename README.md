@@ -4,22 +4,35 @@
 
 Watch all your AI coding agents from one terminal panel.
 
-`roost` is a passive, read-only observer: run it in any terminal and it shows every AI coding agent session running on your machine — **Claude Code**, **Codex**, **DeepSeek (CodeWhale)**, and **Cursor** — grouped by whether they need your attention, in real time.
+`roost` is a passive, read-only observer: run it in any terminal and it shows every AI coding agent session running on your machine — **Claude Code**, **Codex**, **DeepSeek (CodeWhale)**, and **Cursor** — grouped by whether they need your attention, in real time. Add a remote dev box with `roost add user@host` and its agents show up in the same panel, over SSH.
 
 ```
-┌─ roost ──────────────────────────────────────────────────── 4 agents · live ● ─┐
+  roost                                            4 agents · live ●
 
   NEEDS INPUT  1
- ▌⬡ Codex     payments-api   ? Which migration strategy? (1/2)     Codex     8s
+  ┌ ✻ Claude ───────────────────────── ? Question ·  8s ┐
+  ┊ ▸ choose: Postgres or SQLite?                       ┊
+  ┊ ~/work/payments-api              @local · via Cursor ┊
+  └─────────────────────────────────────────────────────┘
 
   WORKING  2
-  ✻ Claude    roost          ⠸ working   Editing src/session.rs    Zed       1m
-  ❯ Cursor    web-frontend   ⠸ working   Editing app/page.tsx      Cursor    12s
+  ┏ ✻ Claude ──────────────────────── ⠹ Working ·  3s ━┓  ← selected: heavy accent border
+  ┃ ▸ Editing src/components/Editor.tsx                 ┃
+  ┃ ~/dev/myapp                    @local · via Ghostty  ┃
+  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+  ┌ ⬡ Codex ───────────────────────── ⠹ Working · 12s ┐
+  ┊ ▸ Editing app/page.tsx                             ┊
+  ┊ ~/work/api               @desk-mini · via VS Code  ┊  ← remote: device in cold blue
+  └────────────────────────────────────────────────────┘
 
-  IDLE  1
-  ≈ DeepSeek  api-server     ✓ done                                Warp      3m
+  OFFLINE  1
+  ┌┄ ≈ CodeWhale ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ⊘ offline ·  2m ┄┐  ← disconnected: dashed + dimmed
+  ┊ ⊘ Training run · epoch 4/10                         ┊
+  ┊ ~/ml/pipeline                 @gpu-rig · via Cursor  ┊
+  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘
 
-  ↑/↓ j/k select · enter peek · o jump · s stats · c settings · q quit
+  ~/dev/myapp
+  ↑/↓ select   enter peek   o jump   s stats   c settings   q quit
 ```
 
 roost does **not** start, proxy, or control agents. It works entirely through the hook callbacks each agent fires — installing them is a one-time `roost setup`.
@@ -29,7 +42,7 @@ roost does **not** start, proxy, or control agents. It works entirely through th
 ## Features
 
 - **One panel for every agent** — all running Claude Code, Codex, DeepSeek (CodeWhale), and Cursor sessions on the machine, live.
-- **Attention-first grouping** — sessions sorted into `NEEDS INPUT` → `WORKING` → `IDLE`, so the ones waiting on you float to the top.
+- **Attention-first grouping** — sessions sorted into `NEEDS INPUT` → `WORKING` → `IDLE` → `OFFLINE`, so the ones waiting on you float to the top; dropped remote sessions sink to the bottom.
 - **Rich per-session state** — Approval, Question, Working, Done, Idle — each with its own glyph and colour.
 - **Clarify question cards** — when an agent asks an interactive question (Claude `AskUserQuestion`, Codex `request_user_input`), roost shows the actual question text and a `(1/N)` indicator for multi-question cards, instead of a generic "needs permission".
 - **Live activity text** — what each agent is doing right now (`Editing src/foo.rs`, `Running tests`, `thinking…`).
@@ -91,6 +104,9 @@ for you — so you can also just run `roost` and accept the prompt.
 | `roost update` | Update to the latest release in place (script installs only). |
 | `roost daemon` | Run the background daemon in the foreground. Normally started automatically by `roost`. |
 | `roost hook <family> <event>` | Called by agent hooks — sends one event to the daemon then exits immediately. |
+| `roost add <user@host>` | Add a remote dev box: installs roost + hooks over SSH and forwards its events back to this machine. See [Remote fleet](#remote-fleet-ssh). |
+| `roost remove <user@host>` | Remove a remote: tear down the tunnel, unregister it, uninstall its hooks. `--purge` also removes the remote binary. |
+| `roost remotes` | List added remotes and their tunnel status. |
 
 ### Keys
 
@@ -134,7 +150,7 @@ Each shows up with its own glyph and colour. New agents are added over time — 
 
 ## Session states
 
-Grouped in priority order: **NEEDS INPUT** (Approval, then Question) → **WORKING** → **IDLE**.
+Grouped in priority order: **NEEDS INPUT** (Approval, then Question) → **WORKING** → **IDLE** → **OFFLINE** (bottom).
 
 | State | Glyph | Colour | Trigger |
 |---|---|---|---|
@@ -143,8 +159,9 @@ Grouped in priority order: **NEEDS INPUT** (Approval, then Question) → **WORKI
 | Working | braille spinner | green | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` |
 | Done | `✓` | muted green | `Stop` |
 | Idle | `○` | slate | `SessionStart` before the first prompt, or after an idle notification |
+| Offline | `⊘` | dim | Remote session whose SSH tunnel has dropped; card shown with dashed border and dimmed colours |
 
-A session is removed (not shown as "disconnected") when `SessionEnd` fires or when the agent process dies and liveness probing detects it.
+A local session is removed (not shown as "disconnected") when `SessionEnd` fires or when the agent process dies and liveness probing detects it. Remote sessions whose tunnel drops are frozen in the OFFLINE group instead of vanishing, and refresh automatically on reconnect.
 
 ---
 
@@ -164,17 +181,56 @@ The banner **title** is `roost`; the **body** shows `<agent> · <project> — <w
 
 ```json
 {
+  "accent": "#d97757",
   "notify": {
-    "clarify": { "banner": true, "sound": true },
-    "approve": { "banner": true, "sound": true },
-    "done":    { "banner": true, "sound": true }
+    "clarify":        { "banner": true,  "sound": true  },
+    "approve":        { "banner": true,  "sound": true  },
+    "done":           { "banner": true,  "sound": true  },
+    "remote_offline": false
   }
 }
 ```
 
-Edit the file directly, or press **`c`** in the panel to open a scrollable settings page and toggle each switch — changes are saved immediately and take effect on the next notification. A missing file or field falls back to all-on (fail-open).
+- **`accent`** — theme colour (hex) used for the selected-card border and the `roost` brand text in the header. Defaults to `"#d97757"`.
+- **`notify.remote_offline`** — fire a notification when a remote SSH tunnel drops (the session moves to the OFFLINE group). Off by default; opt in here or on the settings page (`c`).
+
+Edit the file directly, or press **`c`** in the panel to open a scrollable settings page and toggle each switch — changes are saved immediately and take effect on the next notification. A missing file or field falls back to all-on (fail-open); `remote_offline` is the exception and defaults to `false`.
 
 **Platforms.** macOS uses `osascript` for banners and `afplay` for sounds — both built in, nothing to install. Linux uses `notify-send` (from `libnotify-bin` / `libnotify`); the per-stage sound rides along as a freedesktop `sound-name` hint (`message-new-instant` / `dialog-warning` / `complete`), falling back to `canberra-gtk-play` / `paplay` when only the sound is enabled. If a tool is missing — or there's no desktop session (headless / SSH) — notifications degrade to a silent no-op, never an error. `roost setup` points you at the package to install when `notify-send` is absent. Other platforms are always a no-op.
+
+---
+
+## Remote fleet (SSH)
+
+Run agents on remote dev boxes? `roost add user@devbox1` brings that machine's
+agents into your local panel — and fires their notifications on *your* machine.
+
+This machine is the **hub**: it runs the only daemon, the TUI, and the
+notifications. Each remote is a passive forwarder that runs **no daemon**. `roost add`
+installs roost and its hooks on the remote over SSH (auto-installing the binary if
+it's missing), then the local daemon supervises a persistent SSH reverse-forward
+tunnel (`ssh -N -R`) that carries the remote's hook events back to the hub. Remotes
+are recorded in `~/.roost/remotes.json` on the hub and re-established on daemon start.
+
+| Command | What it does |
+|---|---|
+| `roost add user@host [--origin name]` | Install + register a remote, bring up its tunnel |
+| `roost remove user@host [--purge]` | Tear down the tunnel, unregister, uninstall remote hooks |
+| `roost remotes` | List remotes and tunnel status (up / reconnecting / down) |
+
+Remote sessions show their origin host in the panel. If a tunnel drops, those
+sessions **freeze** (greyed, dashed border) instead of vanishing, and the daemon
+reconnects automatically; they refresh on the agent's next event.
+
+**Preconditions.** Key-based, non-interactive `ssh <host>` must work (roost adds no
+auth of its own), and the remote needs network access for the one-time binary
+install. A **remote-offline** notification is available but **off by default** —
+toggle it on the settings page (`c`) or in `~/.roost/settings.json`.
+
+**Jump.** `o` can't focus a remote terminal from here; for a remote session it tells
+you which host to SSH into. **Security.** Anyone who can write the forwarded socket
+on a remote can inject events into your local daemon — fine for personal dev boxes,
+worth noting for shared machines.
 
 ---
 
